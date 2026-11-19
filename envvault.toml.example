@@ -1,0 +1,19 @@
+# Copy to envvault.toml (or run `envvault tree init`) and edit.
+# The CLI finds the nearest envvault.toml / envvault.json in this or a parent directory,
+# so inside it plain `envvault pull` / `push` need no flags. Never keep both formats in one folder.
+
+remote = "https://envvault.example.com"   # your hub; or omit and run `envvault remote set <url>`
+project = "my-app"                        # settings cascade down the tree
+env = "default"
+
+[tree.root]
+path = "."                                # ./.env
+
+[tree.web]
+path = "apps/web"                         # apps/web/.env, relative to the parent node
+env = "staging"
+
+[tree.web.children.api]
+path = "../api"                           # relative to apps/web
+project = "my-api"
+file = ".env.local"

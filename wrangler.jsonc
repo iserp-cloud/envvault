@@ -1,0 +1,44 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "app",
+	"main": "src/cloudflare/worker.ts",
+	"compatibility_date": "2025-06-07",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"assets": {
+		"directory": "./dashboard/dist",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application",
+		"run_worker_first": [
+			"/health",
+			"/rpc",
+			"/rpc/*"
+		]
+	},
+	/**
+   * Create a Hyperdrive config pointing at your Postgres, then:
+   *   wrangler hyperdrive create envvault-db --connection-string="postgres://..."
+   * and paste the id below.
+   */
+	// "hyperdrive": [
+	//   {
+	//     "binding": "HYPERDRIVE",
+	//     "id": "YOUR_HYPERDRIVE_ID"
+	//   }
+	// ],
+	/**
+   * Or set a secret for direct Postgres access (less ideal than Hyperdrive):
+   *   wrangler secret put DATABASE_URL
+   */
+	"observability": {
+		"enabled": true
+	},
+	"vars": {
+		"ENVVAULT_SIGNUP": "invite"
+	}
+}

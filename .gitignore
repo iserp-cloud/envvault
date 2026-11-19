@@ -1,0 +1,103 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+dashboard/dist/
+packages/*/dist/
+*.tsbuildinfo
+.envvault/
+# Local vault (sessions, SQLite, keys)
+.centralizer/
+
+# Environment / secrets
+.env
+.env.*
+.env-*
+!.env.example
+.dev.vars
+.dev.vars.*
+.claude/settings.local.json
+
+# Your own deployment config (manifests, helper scripts: hostnames, registries, IPs, secrets).
+# It varies per company, so none of it ships; the image and docs/deploy.md are the contract.
+deploy/
+
+# Credentials and keys, wherever they land
+*.pem
+!/test/fixtures/self-signed.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+*.kubeconfig
+kubeconfig*
+.kube/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.npmrc
+.netrc
+.aws/
+.gcp/
+*credentials*.json
+service-account*.json
+*-sa.json
+secrets.*
+*.secret
+*.secrets
+
+# SQLite sidecars (if created outside .envvault)
+*.db
+*.db-shm
+*.db-wal
+
+# Cloudflare / Wrangler
+.wrangler/
+.mf/
+
+# Logs & debug
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.sw?
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Lockfiles from other package managers (pnpm-lock.yaml is tracked)
+package-lock.json
+npm-shrinkwrap.json
+yarn.lock
+
+# Container hub bundle
+dist-hub/
+
+
+# Private CA and server key made by scripts/self-signed-cert.sh
+envvault-tls/
+
+# A file or folder whose name ends in ":" is a database URL that was used as a path by mistake
+# (it can contain a password). The hub now refuses such URLs; this is the second line of defence.
+*:

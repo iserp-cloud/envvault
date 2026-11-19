@@ -1,0 +1,50 @@
+# Local Postgres for `pnpm serve`:   docker compose up -d
+#   Configure POSTGRES_PASSWORD and DATABASE_URL in .env as described in docs/setup.md.
+# The whole stack in containers:     docker compose --profile app up -d --build
+#   (the hub prints a one-time setup token in its log:  docker compose logs hub)
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: envvault-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: envvault
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: envvault
+    ports:
+      # Localhost only. 5433 avoids clashing with another Postgres on 5432;
+      # override with ENVVAULT_PG_PORT.
+      - "127.0.0.1:${ENVVAULT_PG_PORT:-5433}:5432"
+    volumes:
+      - envvault-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U envvault -d envvault"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # The hub itself, as it would run on Docker/Kubernetes. Opt-in via the "app" profile.
+  # hub:
+  #   profiles: ["app"]
+  #   build: .
+  #   image: envvault-hub:local
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   environment:
+  #     # Inside the compose network Postgres is `postgres:5432`; add ?sslmode=verify-full for remote DBs.
+  #     DATABASE_URL: postgresql://envvault:${POSTGRES_PASSWORD}@postgres:5432/envvault
+  #     ENVVAULT_SIGNUP: ${ENVVAULT_SIGNUP:-invite}
+  #     # Required, no default: a published value would defeat the pepper. Generate one with
+  #     #   openssl rand -base64 48
+  #     ENVVAULT_PEPPER: ${ENVVAULT_PEPPER:?set ENVVAULT_PEPPER (e.g. openssl rand -base64 48)}
+  #     ENVVAULT_SETUP_TOKEN: ${ENVVAULT_SETUP_TOKEN:-}
+  #   ports:
+  #     - "127.0.0.1:${ENVVAULT_PORT:-3847}:3847"
+  #   read_only: true
+  #   cap_drop: [ALL]
+  #   security_opt: ["no-new-privileges:true"]
+  #   restart: unless-stopped
+
+volumes:
+  envvault-pgdata:

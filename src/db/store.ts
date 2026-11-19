@@ -1,0 +1,86 @@
+/** Data-access barrel — prefer importing from domain modules when adding new code. */
+export { ensureSchema } from "./migrate.js";
+export { getSetting, setSetting, deleteSettings } from "./settings.js";
+export {
+  countUsers,
+  countActiveAdmins,
+  getUser,
+  listUsers,
+  insertUser,
+  updateUser,
+  getUserBySessionToken,
+  createSession,
+  deleteSessionsForUser,
+  purgeExpiredSessions,
+  listServiceAccounts,
+  latestSessionExpiry,
+  listSessionsForUser,
+  revokeSessionById,
+  revokeOtherSessions,
+  withAdminLock,
+  listDistinctKdfs,
+} from "./users.js";
+export { insertAudit, listAudit, purgeAuditBefore, hasLoginFromAddress } from "./audit.js";
+export {
+  createInvite,
+  getInviteByTokenHash,
+  listInvites,
+  claimInvite,
+  revokeInvite,
+} from "./invites.js";
+export {
+  createTenant,
+  getTenant,
+  getTenantBySlug,
+  isHandleTaken,
+  countOwnedOrgs,
+  listTenantsForUser,
+  listPendingInvites,
+  upsertTenantMember,
+  getTenantMember,
+  listTenantMembers,
+  removeTenantMember,
+  deleteTenant,
+} from "./tenants.js";
+export type { StoredProject } from "./projects.js";
+export {
+  listStoredProjects,
+  getStoredProject,
+  upsertStoredProject,
+  insertNewProject,
+  removeStoredProject,
+  hasStoredProject,
+  listActiveAdminsAndOwner,
+  listProjectsForUser,
+  canManageProject,
+  canDeleteProject,
+} from "./projects.js";
+export type { StoredEnvironment, EnvironmentVersionMeta } from "./environments.js";
+export {
+  upsertStoredEnvironment,
+  insertNewEnvironment,
+  holdKeyVersion,
+  getStoredEnvironment,
+  hasStoredEnvironment,
+  countEnvironments,
+  removeStoredEnvironment,
+  saveStoredEnvironmentIf,
+  reencryptStoredEnvironmentIf,
+  listEnvironmentVersions,
+  getEnvironmentVersion,
+  listEnvironmentVersionPayloads,
+  deleteEnvironmentVersion,
+  MAX_ENV_HISTORY,
+  listEnvironmentsForUser,
+  upsertEnvironmentKey,
+  getEnvironmentKey,
+  deleteEnvironmentKey,
+  upsertEnvironmentAcl,
+  getEnvironmentAcl,
+  listEnvironmentAcl,
+  deleteEnvironmentAcl,
+  replaceEnvironmentKeys,
+  listEnvironmentKeysForUser,
+  markRotationPending,
+  clearRotationPending,
+} from "./environments.js";
