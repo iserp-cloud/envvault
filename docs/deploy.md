@@ -43,7 +43,7 @@ A `DATABASE_URL` that looks like a URL but doesn't start with `postgres://` or `
 | `ENVVAULT_PEPPER` | long random secret | **Required in production** — the hub refuses to start without it (`ENVVAULT_ALLOW_NO_PEPPER=true` overrides, not recommended). Mixed into stored login-proof hashes and audit signatures; without it they use a public constant. Keep it out of the database; changing it invalidates all logins, so back it up. |
 | `ENVVAULT_TRUSTED_PROXIES` | `1` behind one ingress | How many reverse-proxy hops' `X-Forwarded-For` to trust. **Default 0 ignores the header**, so clients can't forge their address and dodge rate limits. Set it to your real hop count (ingress = 1; load balancer + ingress = 2). |
 | `ENVVAULT_HSTS` | `true` | Sends `Strict-Transport-Security`. Enable once TLS terminates in front of the hub. |
-| `ENVVAULT_TLS_CERT` / `ENVVAULT_TLS_KEY` | unset | Paths to PEM files. When both are set the hub serves https itself, for deployments with no proxy in front (see `docs/setup.md`). Set both or neither. |
+| `ENVVAULT_TLS_CERT` / `ENVVAULT_TLS_KEY` | unset | Paths to PEM files. When both are set the hub serves https itself, for deployments with no proxy in front (see `docs/setup.md`). Set both or neither. A plain `http://` visit to the same port is redirected to https. |
 | `ENVVAULT_SIGNUP` | `invite` | `invite` (default), `open`, or `closed`. |
 | `ENVVAULT_SESSION_DAYS` | `14` | Session lifetime. |
 | `ENVVAULT_SETUP_TOKEN` | optional on Node | Pin the first-run token instead of generating one. **Required on Cloudflare Workers**, which can't print one. |
