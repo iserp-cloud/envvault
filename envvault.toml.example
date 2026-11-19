@@ -3,8 +3,10 @@
 # so inside it plain `envvault pull` / `push` need no flags. Never keep both formats in one folder.
 
 remote = "https://envvault.example.com"   # your hub; or omit and run `envvault remote set <url>`
+workspace = "my-team"                     # must already exist on the hub (never created by the CLI)
 project = "my-app"                        # settings cascade down the tree
 env = "default"
+create = true                             # push creates a missing project / environment (omit to refuse instead)
 
 [tree.root]
 path = "."                                # ./.env

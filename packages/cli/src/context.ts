@@ -14,8 +14,11 @@ export type TargetFlags = {
   project?: string;
   env?: string;
   tenant?: string;
+  /** `--workspace`: another name for `tenant`. */
+  workspace?: string;
   file?: string;
   merge?: boolean;
+  create?: boolean;
 };
 
 /** Where a command acts: flags first, then the nearest config's node for this directory. */
@@ -26,6 +29,8 @@ export type Context = {
   /** Absolute path of the env file (default `.env` next to the config node, or in cwd). */
   file: string;
   merge: boolean;
+  /** Push creates a missing project / environment. */
+  create: boolean;
   /** The config file that supplied settings, and which target of it. */
   source?: { path: string; target?: string };
 };
@@ -63,11 +68,12 @@ export function resolveContext(
   const env = (flags.env ?? node?.env ?? root?.env ?? config.defaultEnv ?? DEFAULT_ENV_NAME)
     .trim()
     .toLowerCase();
-  const tenant = flags.tenant ?? node?.tenant ?? root?.tenant;
+  const tenant = flags.tenant ?? flags.workspace ?? node?.tenant ?? root?.tenant;
   const file = flags.file
     ? resolve(cwd, flags.file)
     : node?.file ?? resolve(treeFile?.dir ?? cwd, root?.file ?? ".env");
   const merge = flags.merge ?? node?.merge ?? root?.merge ?? false;
+  const create = flags.create ?? node?.create ?? root?.create ?? false;
 
   return {
     project,
@@ -75,6 +81,7 @@ export function resolveContext(
     tenant,
     file,
     merge,
+    create,
     source: treeFile ? { path: treeFile.path, target: node?.name } : undefined,
   };
 }

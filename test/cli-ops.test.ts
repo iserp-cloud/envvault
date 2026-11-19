@@ -16,7 +16,9 @@ import { __setKeyringForTests, persistSession, type Ring } from "../packages/cli
 import {
   hubCreateEnv,
   hubCreateProject,
+  ensureEnvironment,
   hubGetEnv,
+  isDenied,
   hubListEnvironments,
   hubSaveEnv,
   hubSignup,
@@ -32,7 +34,9 @@ import {
   hubRestoreVersion,
   hubRotate,
 } from "../packages/cli/src/ops.js";
-import { loadTargetAccess, syncTree } from "../packages/cli/src/commands/sync.js";
+import { loadTargetAccess, pushTarget, syncTree } from "../packages/cli/src/commands/sync.js";
+import { resolveTenantArg } from "../packages/cli/src/cli/helpers.js";
+import { parseTreeConfig, resolveTargets } from "../packages/cli/src/tree.js";
 import { loadTreeTargets } from "../packages/cli/src/context.js";
 
 const REMOTE = "http://hub.test";
@@ -316,6 +320,58 @@ describe("CLI environment operations (against an in-process hub)", () => {
       process.chdir(cwd);
     }
     assert.ok(existsSync(join(tree, "dir1/.env")));
+  });
+
+  it("creates a missing project and environment on push, only when asked; never a workspace", async () => {
+    const file = join(root, "create.env");
+    writeFileSync(file, "NEW=1\n");
+    const alice = as("alice");
+
+    // Without `create`, a project that isn't there is refused (as before).
+    await assert.rejects(
+      pushTarget(alice, { project: "fresh", env: "default", file, tenantId: orgId }),
+      /No access to fresh\/default/,
+    );
+
+    // With it, the project (and its default environment) is created, then filled.
+    const first = await pushTarget(alice, { project: "fresh", env: "default", file, tenantId: orgId, create: true });
+    assert.equal(first.created, "project and environment");
+    assert.deepEqual((await hubGetEnv(alice, "fresh", "default", orgId)).env, { NEW: "1" });
+
+    // A second run changes nothing but the data.
+    writeFileSync(file, "NEW=2\n");
+    const again = await pushTarget(alice, { project: "fresh", env: "default", file, tenantId: orgId, create: true });
+    assert.equal(again.created, "");
+
+    // A new environment on an existing project; a new project with a non-default environment.
+    const staging = await pushTarget(alice, { project: "fresh", env: "Staging", file, tenantId: orgId, create: true });
+    assert.equal(staging.created, "environment");
+    const both = await pushTarget(alice, { project: "other", env: "prod", file, tenantId: orgId, create: true });
+    assert.equal(both.created, "project and environment");
+    assert.deepEqual((await hubGetEnv(alice, "other", "prod", orgId)).env, { NEW: "2" });
+
+    // Something that exists but that you can't open is reported, never overwritten.
+    await assert.rejects(
+      ensureEnvironment(as("bob"), "app", "default", orgId),
+      (e: unknown) => isDenied(e),
+    );
+
+    // The workspace must exist: a typo is an error that lists yours, and nothing is created.
+    await assert.rejects(resolveTenantArg(as("alice"), "acmee"), /Workspace not found: acmee\. Workspaces you belong to: .*acme/);
+
+    for (const name of ["fresh", "other"]) await hubDeleteProject(as("alice"), name, orgId);
+  });
+
+  it("reads `workspace` and `create` from the config, with `tenant` as the older name", () => {
+    const text = (extra: string) => `project = "p"\n${extra}\n[tree.a]\n[tree.b]\ncreate = false\nworkspace = "other"\n`;
+    const targets = resolveTargets({
+      path: "x/envvault.toml",
+      dir: "x",
+      config: parseTreeConfig(text('workspace = "acme"\ncreate = true'), "toml"),
+    });
+    assert.deepEqual(targets.map((t) => [t.name, t.tenant, t.create]), [["a", "acme", true], ["b", "other", false]]);
+    assert.equal(parseTreeConfig('tenant = "old"\nproject = "p"', "toml").tenant, "old");
+    assert.throws(() => parseTreeConfig('tenant = "a"\nworkspace = "b"', "toml"), /"workspace" or "tenant", not both/);
   });
 
   it("deletes a project", async () => {

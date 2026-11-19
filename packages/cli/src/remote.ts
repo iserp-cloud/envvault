@@ -544,6 +544,42 @@ export async function hubCreateEnv(
   return client.environments.create({ tenantId: tid, project, name: envName, payload, keyWraps });
 }
 
+/**
+ * Make sure a project and environment exist, creating whatever is missing (the workspace is never created).
+ * The hub doesn't say whether a name is hidden from you or absent, so creation is insert-only: a name that
+ * exists but you can't open comes back as a conflict and is reported as that, not overwritten.
+ */
+export async function ensureEnvironment(
+  config: EnvVaultConfig,
+  project: string,
+  envName: string,
+  tenantId?: string,
+): Promise<{ createdProject: boolean; createdEnv: boolean }> {
+  const session = requireSession(config);
+  const tid = tenantId ?? session.activeTenantId;
+  const name = envName.trim().toLowerCase() || DEFAULT_ENV_NAME;
+  if ((await hubEnvironmentAccess(config, project, tid)).some((e) => e.name === name)) {
+    return { createdProject: false, createdEnv: false };
+  }
+  const projectVisible = (await hubListProjects(config, tid)).some((p) => p.name === project);
+  try {
+    if (!projectVisible) {
+      await hubCreateProject(config, project, tid); // starts with a `default` environment
+      if (name !== DEFAULT_ENV_NAME) await hubCreateEnv(config, project, name, tid);
+      return { createdProject: true, createdEnv: true };
+    }
+    await hubCreateEnv(config, project, name, tid);
+    return { createdProject: false, createdEnv: true };
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code === "CONFLICT") {
+      throw new NoAccessError(
+        `${project}/${name} already exists but you can't open it, so it wasn't created. Ask for access to be granted.`,
+      );
+    }
+    return explainDenied(err, "create", project, name);
+  }
+}
+
 export function hasRemote(config: EnvVaultConfig): boolean {
   return Boolean(process.env.ENVVAULT_REMOTE ?? config.remote);
 }

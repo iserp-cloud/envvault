@@ -18,7 +18,7 @@ import { isVaultInitialized } from "./rpc/runtime.js";
 import { pepperPolicy } from "./auth-proof.js";
 import { trustedProxyHops } from "./ratelimit.js";
 import { ensureSetupToken } from "./setup-token.js";
-import { tlsFromEnv } from "./tls.js";
+import { redirectingFront, tlsFromEnv } from "./tls.js";
 import { sql } from "kysely";
 import { bodyLimitViolation, resolveCorsOrigin, securityHeaders } from "./security.js";
 
@@ -198,8 +198,9 @@ export async function startServer(options: ServeOptions = {}): Promise<void> {
 
     sendJson(res, 404, { error: "Not found" });
   };
+  // With TLS, a plain-http visit to the same port is redirected to https instead of failing.
   const server = tls
-    ? createHttpsServer({ ...tls, minVersion: "TLSv1.2" }, onRequest)
+    ? redirectingFront(createHttpsServer({ ...tls, minVersion: "TLSv1.2" }, onRequest), `${host === "0.0.0.0" ? "localhost" : host}:${port}`)
     : createHttpServer(onRequest);
 
   server.listen(port, host, () => {

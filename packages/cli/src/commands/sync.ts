@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { levelAtLeast, mergeEnv, parseEnv, serializeEnv, type EnvMap } from "@envvault/shared";
 import { loadConfig, requireSession, type EnvVaultConfig } from "../config.js";
-import { hubEnvironmentAccess, hubGetEnv, hubSaveEnv, isDenied, type AccessLevel } from "../remote.js";
+import { ensureEnvironment, hubEnvironmentAccess, hubGetEnv, hubSaveEnv, isDenied, type AccessLevel } from "../remote.js";
 import { resolveTenantArg, writeSecretFile } from "../cli/helpers.js";
 import { loadTreeTargets } from "../context.js";
 import { selectMany } from "../cli/select.js";
@@ -22,25 +22,35 @@ export async function pullTarget(
   return { keys: Object.keys(env).length };
 }
 
-/** Push a file to one target's environment. */
+/** What creating a missing target added on the hub, in words ("project and environment", …), or "". */
+export function describeCreated(c: { createdProject: boolean; createdEnv: boolean }): string {
+  return c.createdProject ? "project and environment" : c.createdEnv ? "environment" : "";
+}
+
+/** Push a file to one target's environment; with `create`, a missing project / environment is created first. */
 export async function pushTarget(
   config: EnvVaultConfig,
-  t: { project: string; env: string; file: string; tenantId?: string },
-): Promise<{ keys: number; updatedAt: string }> {
+  t: { project: string; env: string; file: string; tenantId?: string; create?: boolean },
+): Promise<{ keys: number; updatedAt: string; created: string }> {
   if (!existsSync(t.file)) throw new Error(`File not found: ${rel(t.file)}`);
   const env = parseEnv(readFileSync(t.file, "utf8"));
+  const created = t.create ? describeCreated(await ensureEnvironment(config, t.project, t.env, t.tenantId)) : "";
   const saved = await hubSaveEnv(config, t.project, t.env, env, t.tenantId);
-  return { keys: Object.keys(env).length, updatedAt: saved.updatedAt };
+  return { keys: Object.keys(env).length, updatedAt: saved.updatedAt, created };
 }
 
 export type TreeSyncOptions = {
   config?: string;
   tenant?: string;
+  /** `--workspace`: another name for `tenant`. */
+  workspace?: string;
   dryRun?: boolean;
   /** Report targets you may not open/write as skipped instead of failing the run. */
   skipDenied?: boolean;
   /** Pick which targets to sync from a list, instead of naming them. */
   interactive?: boolean;
+  /** Push: create missing projects / environments for every target (a target's own `create` setting also counts). */
+  create?: boolean;
 };
 
 /** What you may do with a target: undefined when unknown (offline or not logged in), null for nothing. */
@@ -78,10 +88,14 @@ export async function loadTargetAccess(
   return result;
 }
 
-/** "no access", "read-only" for a push, or null when the action would be allowed. */
-function blockedBy(access: TargetAccess, direction: "pull" | "push"): string | null {
+/**
+ * "not found or no access", "read-only" for a push, or null when the action would be allowed.
+ * The hub never says whether something is missing or hidden from you, so one answer covers both;
+ * a push that creates missing things isn't blocked by a target that isn't there yet.
+ */
+function blockedBy(access: TargetAccess, direction: "pull" | "push", creates = false): string | null {
   if (access === undefined) return null;
-  if (access === null) return "no access";
+  if (access === null) return direction === "push" && creates ? null : "not found or no access";
   if (direction === "push" && !levelAtLeast(access.level, "write")) return "read-only";
   return null;
 }
@@ -119,7 +133,7 @@ export async function syncTree(
   if (!opts.dryRun) requireSession(config);
 
   if (opts.interactive) {
-    const picked = await pickTargets(direction, targets, config, loggedIn, opts.tenant);
+    const picked = await pickTargets(direction, targets, config, loggedIn, opts.tenant ?? opts.workspace);
     if (!picked?.length) {
       info(picked ? "Nothing selected." : "Cancelled.");
       return;
@@ -129,7 +143,7 @@ export async function syncTree(
 
   hint(`${plural(targets.length, "target")} from ${rel(loaded.treeFile.path)}`);
   const tenantCache = new Map<string | undefined, Promise<string>>();
-  const access = opts.dryRun && loggedIn ? await loadTargetAccess(config, targets, opts.tenant) : new Map();
+  const access = opts.dryRun && loggedIn ? await loadTargetAccess(config, targets, opts.tenant ?? opts.workspace) : new Map();
   let synced = 0;
   let skipped = 0;
   let failed = 0;
@@ -143,6 +157,11 @@ export async function syncTree(
     const label = `${c.bold(t.name)} ${c.dim(`(${t.project}/${t.env})`)}`;
     try {
       if (opts.dryRun) {
+        const missing = direction === "push" && access.get(t) === null;
+        if (missing && (opts.create || t.create)) {
+          info(`${c.dim("[dry-run]")} push ${label} ← ${rel(t.file)}  ${c.green("would create it if it doesn't exist")}`);
+          return;
+        }
         const blocked = blockedBy(access.get(t), direction);
         if (blocked && opts.skipDenied) return skip(label, `${blocked}: would be skipped`);
         info(
@@ -152,15 +171,15 @@ export async function syncTree(
         if (blocked) failed++;
         return;
       }
-      const tenantArg = opts.tenant ?? t.tenant;
+      const tenantArg = opts.tenant ?? opts.workspace ?? t.tenant;
       if (!tenantCache.has(tenantArg)) tenantCache.set(tenantArg, resolveTenantArg(config, tenantArg));
       const tenantId = await tenantCache.get(tenantArg)!;
       if (direction === "pull") {
         const { keys } = await pullTarget(config, { ...t, tenantId });
         success(`pulled ${plural(keys, "var")} → ${rel(t.file)}  ${label}`);
       } else {
-        const { keys } = await pushTarget(config, { ...t, tenantId });
-        success(`pushed ${plural(keys, "var")} ← ${rel(t.file)}  ${label}`);
+        const { keys, created } = await pushTarget(config, { ...t, tenantId, create: opts.create || t.create });
+        success(`pushed ${plural(keys, "var")} ← ${rel(t.file)}  ${label}${created ? `  ${c.green(`(created ${created})`)}` : ""}`);
       }
       synced++;
     } catch (err) {
@@ -209,8 +228,9 @@ async function pickTargets(
   const access = loggedIn ? await loadTargetAccess(config, targets, tenant) : new Map<TreeTarget, TargetAccess>();
   const choices = targets.map((t) => {
     const notes = [`${t.project}/${t.env}`];
-    const blocked = blockedBy(access.get(t), direction);
+    const blocked = blockedBy(access.get(t), direction, t.create);
     if (blocked) notes.push(c.red(blocked));
+    else if (direction === "push" && t.create && access.get(t) === null) notes.push(c.green("new: push creates it"));
     if (direction === "push" && !existsSync(t.file)) notes.push(c.yellow("no file yet"));
     return { label: t.name, hint: notes.join("  "), value: t };
   });

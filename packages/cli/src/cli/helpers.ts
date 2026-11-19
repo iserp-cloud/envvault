@@ -18,7 +18,10 @@ export async function resolveTenantArg(
       t.slug === tenantArg.toLowerCase() ||
       (tenantArg === "personal" && t.kind === "personal"),
   );
-  if (!match) throw new Error(`Tenant not found: ${tenantArg}`);
+  if (!match) {
+    const names = tenants.map((t) => t.slug).join(", ") || "none";
+    throw new Error(`Workspace not found: ${tenantArg}. Workspaces you belong to: ${names}. (Workspaces are never created by the CLI.)`);
+  }
   return match.id;
 }
 
