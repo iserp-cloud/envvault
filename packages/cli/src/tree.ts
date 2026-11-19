@@ -14,6 +14,8 @@ export type TreeSettings = {
   file?: string;
   /** Pull only: merge into the existing file instead of overwriting. */
   merge?: boolean;
+  /** Push only: create the project / environment on the hub when it doesn't exist yet. */
+  create?: boolean;
 };
 
 export type TreeNode = TreeSettings & {
@@ -45,6 +47,7 @@ export type TreeTarget = {
   env: string;
   tenant?: string;
   merge: boolean;
+  create: boolean;
 };
 
 const SETTING_KEYS = ["tenant", "project", "env", "file"] as const;
@@ -93,7 +96,13 @@ function validateNode(raw: unknown, where: string): TreeNode {
     const v = expectString(r[key], where, key);
     if (v !== undefined) node[key] = v;
   }
-  for (const key of ["merge", "sync"] as const) {
+  // "workspace" is the name people use; the hub calls it a tenant. Accept either, never both.
+  const workspace = expectString(r.workspace, where, "workspace");
+  if (workspace !== undefined) {
+    if (node.tenant !== undefined) throw new Error(`${where}: set "workspace" or "tenant", not both`);
+    node.tenant = workspace;
+  }
+  for (const key of ["merge", "create", "sync"] as const) {
     if (r[key] === undefined) continue;
     if (typeof r[key] !== "boolean") {
       throw new Error(`${where}: "${key}" must be true or false`);
@@ -181,6 +190,7 @@ export function resolveTargets(treeFile: TreeFile): TreeTarget[] {
       env: (s.env ?? "default").toLowerCase(),
       tenant: s.tenant,
       merge: s.merge ?? false,
+      create: s.create ?? false,
     };
   };
 
@@ -196,6 +206,7 @@ export function resolveTargets(treeFile: TreeFile): TreeTarget[] {
       const settings: TreeSettings = { ...inherited };
       for (const k of SETTING_KEYS) if (node[k] !== undefined) settings[k] = node[k];
       if (node.merge !== undefined) settings.merge = node.merge;
+      if (node.create !== undefined) settings.create = node.create;
 
       if (node.sync !== false) {
         // Nodes without an explicit project fall back to inheritance, then the key.
@@ -208,6 +219,7 @@ export function resolveTargets(treeFile: TreeFile): TreeTarget[] {
   const rootSettings: TreeSettings = {};
   for (const k of SETTING_KEYS) if (config[k] !== undefined) rootSettings[k] = config[k];
   if (config.merge !== undefined) rootSettings.merge = config.merge;
+  if (config.create !== undefined) rootSettings.create = config.create;
 
   if (config.tree) {
     walk(config.tree, dir, "", rootSettings);
@@ -237,8 +249,10 @@ export function filterTargets(targets: TreeTarget[], names: string[]): TreeTarge
 export const TREE_TEMPLATES = {
   json: `{
   "remote": "https://envvault.example.com",
+  "workspace": "my-team",
   "project": "my-app",
   "env": "default",
+  "create": true,
   "tree": {
     "root": { "path": ".", "file": ".env" },
     "web": {
@@ -252,8 +266,10 @@ export const TREE_TEMPLATES = {
 }
 `,
   toml: `remote = "https://envvault.example.com"
-project = "my-app"   # defaults cascade to every node below
+workspace = "my-team"   # must already exist on the hub; the CLI never creates workspaces
+project = "my-app"      # defaults cascade to every node below
 env = "default"
+create = true           # push creates a missing project / environment (omit to refuse instead)
 
 [tree.root]
 path = "."

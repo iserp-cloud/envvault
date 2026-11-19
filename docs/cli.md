@@ -86,8 +86,10 @@ Flags always win: `-p`, `-e`, `-t`, `-f` (or a positional project) make a comman
 
 ```toml
 remote = "https://envvault.example.com"
+workspace = "my-team"     # must already exist on the hub
 project = "my-app"        # settings cascade down the tree
 env = "default"
+create = true             # push creates a missing project / environment
 
 [tree.root]
 path = "."
@@ -106,10 +108,18 @@ Equivalent JSON uses `"tree": { "web": { "path": "apps/web", "children": { … }
 | Key | Where | Description |
 |---|---|---|
 | `remote` | root | Hub URL (overrides global/project config) |
-| `tenant`, `project`, `env`, `file`, `merge` | root or any node | Inherited by children. `file` defaults to `.env`; `project` defaults to the node key; `merge` applies to pull |
+| `workspace` (or `tenant`), `project`, `env`, `file`, `merge`, `create` | root or any node | Inherited by children. `file` defaults to `.env`; `project` defaults to the node key; `merge` applies to pull; `create` applies to push |
 | `path` | node | Directory, relative to the parent node |
 | `sync = false` | node | Grouping directory only; children still sync |
 | `children` | node | Nested nodes |
+
+### Creating what's missing
+
+`push` normally needs the project and environment to exist. With `create = true` in the config (or `--create` on `push` / `tree push`), a missing **project** and **environment** are created first and then filled, so a fresh hub can be set up straight from the config. Both are created under your own key like any other, so everyone with access in the workspace can open them. Creating a project also creates its `default` environment.
+
+- **The workspace is never created.** If `workspace` names one you don't belong to, the command stops with `Workspace not found` and lists yours.
+- **Nothing is overwritten.** If the name exists but you can't open it, the CLI says so instead of replacing it. Creating needs the same permission as `project create` / `env create`, and service tokens can't create.
+- `tree push -n --create` shows what would be created without changing anything.
 
 With no `tree` section, the root settings describe one target. `envvault whoami` shows which config file and target are in effect.
 
@@ -237,11 +247,12 @@ envvault get                          # everything, as dotenv text
 |---|---|---|
 | `-p, --project` | config, then saved default | Project |
 | `-e, --env` | config, then `default` | Environment |
-| `-t, --tenant` | config, then active workspace | Workspace slug or id |
+| `-t, --tenant`, `-w, --workspace` | config, then active workspace | Workspace slug or id (it must exist) |
 | `-f, --file` | `.env`, or the config's `file` | Local file (`pull`, `push`) |
 | `--merge` | | (`pull`) merge into the existing file |
 | `--all` | | (`pull`, `push`) every target in the config |
 | `-y, --yes` | | (`push`) don't ask before pushing an empty file |
+| `--create` | config's `create`, else off | (`push`) create the project / environment if missing |
 
 Writes made by `set` and `unset` are rejected if someone else changed the environment since you read it. Every `push`, `set` and `unset` keeps the previous version in the history.
 

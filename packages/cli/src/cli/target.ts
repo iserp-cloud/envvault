@@ -9,7 +9,9 @@ export function withTarget(cmd: Command, opts: { env?: boolean } = {}): Command 
   if (opts.env !== false) {
     cmd.option("-e, --env <name>", 'Environment (default: from envvault.toml/json, else "default")');
   }
-  return cmd.option("-t, --tenant <idOrSlug>", "Workspace (default: from config, else your active one)");
+  return cmd
+    .option("-t, --tenant <idOrSlug>", "Workspace (default: from config, else your active one)")
+    .option("-w, --workspace <idOrSlug>", "Same as --tenant");
 }
 
 export type ResolvedTarget = {

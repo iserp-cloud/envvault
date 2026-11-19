@@ -78,7 +78,7 @@ export function registerTree(program: Command): void {
     });
 
   for (const direction of ["pull", "push"] as const) {
-    tree
+    const cmd = tree
       .command(direction)
       .description(
         direction === "pull" ? "Pull every target's environment into its file" : "Push every target's file to its environment",
@@ -86,9 +86,13 @@ export function registerTree(program: Command): void {
       .argument("[targets...]", "Limit to these targets (a prefix selects a subtree)")
       .option("-c, --config <path>", CONFIG_OPTION)
       .option("-t, --tenant <idOrSlug>", "Workspace override for all targets")
+      .option("-w, --workspace <idOrSlug>", "Same as --tenant")
       .option("-n, --dry-run", "Show what would happen, including targets you have no access to")
       .option("-i, --interactive", `Choose which targets to ${direction} from a list`)
-      .option("--skip-denied", "Report targets you have no access to as skipped instead of failing")
-      .action((names: string[], opts) => syncTree(direction, names, opts));
+      .option("--skip-denied", "Report targets you have no access to as skipped instead of failing");
+    if (direction === "push") {
+      cmd.option("--create", "Create missing projects and environments first (or set create = true in the config)");
+    }
+    cmd.action((names: string[], opts) => syncTree(direction, names, opts));
   }
 }
