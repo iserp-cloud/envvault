@@ -88,10 +88,14 @@ export async function loadTargetAccess(
   return result;
 }
 
-/** "no access", "read-only" for a push, or null when the action would be allowed. */
-function blockedBy(access: TargetAccess, direction: "pull" | "push"): string | null {
+/**
+ * "not found or no access", "read-only" for a push, or null when the action would be allowed.
+ * The hub never says whether something is missing or hidden from you, so one answer covers both;
+ * a push that creates missing things isn't blocked by a target that isn't there yet.
+ */
+function blockedBy(access: TargetAccess, direction: "pull" | "push", creates = false): string | null {
   if (access === undefined) return null;
-  if (access === null) return "no access";
+  if (access === null) return direction === "push" && creates ? null : "not found or no access";
   if (direction === "push" && !levelAtLeast(access.level, "write")) return "read-only";
   return null;
 }
@@ -224,8 +228,9 @@ async function pickTargets(
   const access = loggedIn ? await loadTargetAccess(config, targets, tenant) : new Map<TreeTarget, TargetAccess>();
   const choices = targets.map((t) => {
     const notes = [`${t.project}/${t.env}`];
-    const blocked = blockedBy(access.get(t), direction);
+    const blocked = blockedBy(access.get(t), direction, t.create);
     if (blocked) notes.push(c.red(blocked));
+    else if (direction === "push" && t.create && access.get(t) === null) notes.push(c.green("new: push creates it"));
     if (direction === "push" && !existsSync(t.file)) notes.push(c.yellow("no file yet"));
     return { label: t.name, hint: notes.join("  "), value: t };
   });

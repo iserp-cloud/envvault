@@ -52,7 +52,8 @@ export function registerTree(program: Command): void {
       const describe = (t: (typeof targets)[number]) => {
         const a = access.get(t);
         if (a === undefined) return "";
-        return a === null ? c.red("no access") : describeAccess(a.level, a.caps);
+        if (a !== null) return describeAccess(a.level, a.caps);
+        return t.create ? c.green("not found: push creates it") : c.yellow("not found or no access");
       };
 
       if (opts.json) {
@@ -61,6 +62,7 @@ export function registerTree(program: Command): void {
           targets: targets.map((t) => ({
             ...t,
             access: access.get(t) === undefined ? undefined : access.get(t) === null ? "none" : describe(t),
+            create: t.create,
           })),
         });
       }
@@ -73,7 +75,7 @@ export function registerTree(program: Command): void {
       );
       if (!opts.offline && !known) hint("Log in to see your access to each target.");
       else if (known && [...access.values()].some((a) => a === null)) {
-        hint("Targets marked no access fail to sync; add --skip-denied to pull/push to skip them.");
+        hint("Targets that aren't found (or hidden from you) fail to sync; add --skip-denied to skip them, or create = true to have push create them.");
       }
     });
 
