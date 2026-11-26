@@ -1,10 +1,18 @@
-/** Auto-detect and parse pasted .env or JSON into a flat key/value map */
+/**
+ * Auto-detect and parse pasted .env or JSON into key/value pairs, and the group of each key when the text names
+ * them: `# @group name` lines in .env, a nested object per group in JSON.
+ */
+import { normalizeGroup, serializeEnvGroups, splitGroupSections, validateGroupName } from "@envvault/shared";
 
 export type ImportFormat = "env" | "json";
 
 export type ImportResult = {
   format: ImportFormat;
   env: Record<string, string>;
+  /** The group of each key that is in a named group. Empty for text that names none. */
+  groups: Record<string, string>;
+  /** True when the text names groups at all, even only the default one: the file then decides every key's group. */
+  hasGroups: boolean;
 };
 
 function parseDotEnv(content: string): Record<string, string> {
@@ -34,6 +42,20 @@ function parseDotEnv(content: string): Record<string, string> {
   return result;
 }
 
+function parseDotEnvGroups(content: string): { env: Record<string, string>; groups: Record<string, string>; hasGroups: boolean } {
+  const sections = splitGroupSections(content);
+  const env: Record<string, string> = {};
+  const groups: Record<string, string> = {};
+  for (const { group, text } of sections) {
+    for (const [key, value] of Object.entries(parseDotEnv(text))) {
+      env[key] = value;
+      if (group) groups[key] = group;
+      else delete groups[key];
+    }
+  }
+  return { env, groups, hasGroups: sections.length > 1 };
+}
+
 function flattenJsonValue(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -41,31 +63,60 @@ function flattenJsonValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function parseJsonEnv(parsed: unknown): Record<string, string> {
-  const result: Record<string, string> = {};
+const isScalar = (v: unknown) => v == null || ["string", "number", "boolean"].includes(typeof v);
+
+/** An object whose name is a group name and whose values are all plain values is a group of keys. */
+function asGroup(name: string, value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (name !== "default" && validateGroupName(name) !== null) return null;
+  const inner = value as Record<string, unknown>;
+  return Object.values(inner).every(isScalar) ? inner : null;
+}
+
+function parseJsonEnv(parsed: unknown): { env: Record<string, string>; groups: Record<string, string>; hasGroups: boolean } {
+  const env: Record<string, string> = {};
+  const groups: Record<string, string> = {};
+  let hasGroups = false;
 
   if (Array.isArray(parsed)) {
     for (const item of parsed) {
       if (Array.isArray(item) && item.length >= 2) {
         const key = String(item[0]).trim();
-        if (key) result[key] = flattenJsonValue(item[1]);
+        if (key) env[key] = flattenJsonValue(item[1]);
         continue;
       }
       if (item && typeof item === "object") {
         const row = item as Record<string, unknown>;
         const key = String(row.key ?? row.name ?? row.KEY ?? "").trim();
-        if (key) result[key] = flattenJsonValue(row.value ?? row.VALUE ?? "");
+        if (key) env[key] = flattenJsonValue(row.value ?? row.VALUE ?? "");
       }
     }
-    return result;
+    return { env, groups, hasGroups };
   }
 
   if (parsed && typeof parsed === "object") {
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!key.trim()) continue;
-      result[key.trim()] = flattenJsonValue(value);
+    // Top-level text values are the default group. An object under a group name holds that group's keys; any
+    // other object stays what it always was, a value holding JSON text.
+    for (const [rawKey, value] of Object.entries(parsed as Record<string, unknown>)) {
+      const key = rawKey.trim();
+      if (!key) continue;
+      const inner = asGroup(key, value);
+      if (!inner) {
+        env[key] = flattenJsonValue(value);
+        delete groups[key];
+        continue;
+      }
+      hasGroups = true;
+      const group = normalizeGroup(key);
+      for (const [k, v] of Object.entries(inner)) {
+        const name = k.trim();
+        if (!name) continue;
+        env[name] = flattenJsonValue(v);
+        if (group) groups[name] = group;
+        else delete groups[name];
+      }
     }
-    return result;
+    return { env, groups, hasGroups };
   }
 
   throw new Error("JSON must be an object or an array of pairs");
@@ -92,9 +143,9 @@ export function detectAndParseImport(raw: string): ImportResult {
   if (looksLikeJson(text)) {
     try {
       const parsed = JSON.parse(text) as unknown;
-      const env = parseJsonEnv(parsed);
-      if (!Object.keys(env).length) throw new Error("JSON contained no keys");
-      return { format: "json", env };
+      const found = parseJsonEnv(parsed);
+      if (!Object.keys(found.env).length) throw new Error("JSON contained no keys");
+      return { format: "json", ...found };
     } catch (err) {
       if (err instanceof SyntaxError) {
         throw new Error("Invalid JSON");
@@ -104,49 +155,46 @@ export function detectAndParseImport(raw: string): ImportResult {
   }
 
   if (looksLikeEnv(text) || text.includes("=")) {
-    const env = parseDotEnv(text);
-    if (!Object.keys(env).length) {
+    const found = parseDotEnvGroups(text);
+    if (!Object.keys(found.env).length) {
       throw new Error("No KEY=value pairs found");
     }
-    return { format: "env", env };
+    return { format: "env", ...found };
   }
 
   // Last resort: try JSON, then env
   try {
     const parsed = JSON.parse(text) as unknown;
-    const env = parseJsonEnv(parsed);
-    if (Object.keys(env).length) return { format: "json", env };
+    const found = parseJsonEnv(parsed);
+    if (Object.keys(found.env).length) return { format: "json", ...found };
   } catch {
     // ignore
   }
 
-  const env = parseDotEnv(text);
-  if (!Object.keys(env).length) {
+  const found = parseDotEnvGroups(text);
+  if (!Object.keys(found.env).length) {
     throw new Error("Could not detect .env or JSON format");
   }
-  return { format: "env", env };
+  return { format: "env", ...found };
 }
 
-export function serializeEnvExport(env: Record<string, string>): string {
-  const keys = Object.keys(env).sort();
-  return (
-    keys
-      .map((key) => {
-        const value = env[key] ?? "";
-        const needsQuotes = /[\s#"']/.test(value) || value === "";
-        if (needsQuotes) {
-          return `${key}="${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-        }
-        return `${key}=${value}`;
-      })
-      .join("\n") + (keys.length ? "\n" : "")
-  );
+export function serializeEnvExport(env: Record<string, string>, groups: Record<string, string> = {}): string {
+  return serializeEnvGroups(env, groups);
 }
 
-export function serializeJsonExport(env: Record<string, string>): string {
-  const sorted: Record<string, string> = {};
+/** Flat `{KEY: value}` when no key has a group; otherwise the default keys on top and one object per group. */
+export function serializeJsonExport(env: Record<string, string>, groups: Record<string, string> = {}): string {
+  const out: Record<string, string | Record<string, string>> = {};
+  const named = new Map<string, Record<string, string>>();
   for (const key of Object.keys(env).sort()) {
-    sorted[key] = env[key] ?? "";
+    const g = normalizeGroup(groups[key]);
+    if (!g) {
+      out[key] = env[key] ?? "";
+      continue;
+    }
+    if (!named.has(g)) named.set(g, {});
+    named.get(g)![key] = env[key] ?? "";
   }
-  return `${JSON.stringify(sorted, null, 2)}\n`;
+  for (const g of [...named.keys()].sort()) out[g] = named.get(g)!;
+  return `${JSON.stringify(out, null, 2)}\n`;
 }

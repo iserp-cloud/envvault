@@ -1,6 +1,17 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { levelAtLeast, mergeEnv, noGroups, parseEnv, serializeEnv, type EnvMap } from "@envvault/shared";
+import {
+  cleanLabels,
+  hasGroupMarkers,
+  levelAtLeast,
+  mergeEnv,
+  noGroups,
+  parseEnv,
+  parseEnvGroups,
+  serializeEnv,
+  serializeEnvGroups,
+  type EnvMap,
+} from "@envvault/shared";
 import { loadConfig, requireSession, type EnvVaultConfig } from "../config.js";
 import { ensureEnvironment, hubEnvironmentAccess, hubGetEnv, hubSaveEnv, isDenied, type AccessLevel } from "../remote.js";
 import { resolveTenantArg, writeSecretFile } from "../cli/helpers.js";
@@ -9,16 +20,30 @@ import { selectMany } from "../cli/select.js";
 import { filterTargets, type TreeTarget } from "../tree.js";
 import { c, hint, info, messageOf, plural, rel, success, warn } from "../ui.js";
 
-/** Pull one target's environment into its file. */
+/**
+ * Pull one target's environment into its file. With `groups`, the file gets a `# @group name` line above each
+ * group's keys; without it the file is plain KEY=value, as always.
+ */
 export async function pullTarget(
   config: EnvVaultConfig,
-  t: { project: string; env: string; file: string; merge: boolean; tenantId?: string },
+  t: { project: string; env: string; file: string; merge: boolean; tenantId?: string; groups?: boolean },
 ): Promise<{ keys: number }> {
   const loaded = await hubGetEnv(config, t.project, t.env, t.tenantId);
   let env: EnvMap = loaded.env;
-  if (t.merge && existsSync(t.file)) env = mergeEnv(parseEnv(readFileSync(t.file, "utf8")), loaded.env);
+  let groups: Record<string, string> = loaded.groups;
+  if (t.merge && existsSync(t.file)) {
+    const text = readFileSync(t.file, "utf8");
+    if (t.groups) {
+      const old = parseEnvGroups(text);
+      env = mergeEnv(old.vars, loaded.env);
+      groups = { ...old.groups, ...loaded.groups };
+      for (const key of Object.keys(loaded.env)) if (!loaded.groups[key]) delete groups[key];
+    } else {
+      env = mergeEnv(parseEnv(text), loaded.env);
+    }
+  }
   mkdirSync(dirname(t.file), { recursive: true });
-  writeSecretFile(t.file, serializeEnv(env));
+  writeSecretFile(t.file, t.groups ? serializeEnvGroups(env, groups) : serializeEnv(env));
   return { keys: Object.keys(env).length };
 }
 
@@ -43,20 +68,36 @@ async function currentGrouping(config: EnvVaultConfig, t: { project: string; env
   }
 }
 
-/** Push a file to one target's environment; with `create`, a missing project / environment is created first. */
+/**
+ * Push a file to one target's environment; with `create`, a missing project / environment is created first.
+ * With `groups`, the file's `# @group name` lines decide each key's group and the names join the environment's
+ * registry. Without it the file has no groups: keys that stay keep the group they were given in the dashboard,
+ * and `markersIgnored` says the file had markers that were left alone.
+ */
 export async function pushTarget(
   config: EnvVaultConfig,
-  t: { project: string; env: string; file: string; tenantId?: string; create?: boolean },
-): Promise<{ keys: number; updatedAt: string; created: string }> {
+  t: { project: string; env: string; file: string; tenantId?: string; create?: boolean; groups?: boolean },
+): Promise<{ keys: number; updatedAt: string; created: string; markersIgnored: boolean }> {
   if (!existsSync(t.file)) throw new Error(`File not found: ${rel(t.file)}`);
-  const env = parseEnv(readFileSync(t.file, "utf8"));
+  const text = readFileSync(t.file, "utf8");
+  const parsed = t.groups ? parseEnvGroups(text) : { vars: parseEnv(text), groups: undefined };
+  const env = parsed.vars;
   const created = t.create ? describeCreated(await ensureEnvironment(config, t.project, t.env, t.tenantId)) : "";
-  // A file has no groups: the keys that stay keep the group they were given in the dashboard. Anyone who can
-  // write an environment can read it, so this does not need more access than the push itself.
-  const grouping = await currentGrouping(config, t);
+  // Anyone who can write an environment can read it, so this does not need more access than the push itself.
+  const current = await currentGrouping(config, t);
+  const grouping = parsed.groups
+    ? { groups: parsed.groups, labels: cleanLabels([...current.labels, ...Object.values(parsed.groups)]) }
+    : current;
   const saved = await hubSaveEnv(config, t.project, t.env, env, grouping, t.tenantId);
-  return { keys: Object.keys(env).length, updatedAt: saved.updatedAt, created };
+  return {
+    keys: Object.keys(env).length,
+    updatedAt: saved.updatedAt,
+    created,
+    markersIgnored: !t.groups && hasGroupMarkers(text),
+  };
 }
+
+const MARKERS_IGNORED = "The file has # @group lines that were left out; add --groups to apply them.";
 
 export type TreeSyncOptions = {
   config?: string;
@@ -70,6 +111,8 @@ export type TreeSyncOptions = {
   interactive?: boolean;
   /** Push: create missing projects / environments for every target (a target's own `create` setting also counts). */
   create?: boolean;
+  /** `--groups`: read and write `# @group` lines. */
+  groups?: boolean;
 };
 
 /** What you may do with a target: undefined when unknown (offline or not logged in), null for nothing. */
@@ -194,11 +237,17 @@ export async function syncTree(
       if (!tenantCache.has(tenantArg)) tenantCache.set(tenantArg, resolveTenantArg(config, tenantArg));
       const tenantId = await tenantCache.get(tenantArg)!;
       if (direction === "pull") {
-        const { keys } = await pullTarget(config, { ...t, tenantId });
+        const { keys } = await pullTarget(config, { ...t, tenantId, groups: opts.groups });
         success(`pulled ${plural(keys, "var")} → ${rel(t.file)}  ${label}`);
       } else {
-        const { keys, created } = await pushTarget(config, { ...t, tenantId, create: opts.create || t.create });
+        const { keys, created, markersIgnored } = await pushTarget(config, {
+          ...t,
+          tenantId,
+          create: opts.create || t.create,
+          groups: opts.groups,
+        });
         success(`pushed ${plural(keys, "var")} ← ${rel(t.file)}  ${label}${created ? `  ${c.green(`(created ${created})`)}` : ""}`);
+        if (markersIgnored) hint(MARKERS_IGNORED);
       }
       synced++;
     } catch (err) {

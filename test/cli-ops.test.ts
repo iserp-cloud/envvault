@@ -34,7 +34,7 @@ import {
   hubRestoreVersion,
   hubRotate,
 } from "../packages/cli/src/ops.js";
-import { loadTargetAccess, pushTarget, syncTree } from "../packages/cli/src/commands/sync.js";
+import { loadTargetAccess, pullTarget, pushTarget, syncTree } from "../packages/cli/src/commands/sync.js";
 import { resolveTenantArg } from "../packages/cli/src/cli/helpers.js";
 import { parseTreeConfig, resolveTargets } from "../packages/cli/src/tree.js";
 import { loadTreeTargets } from "../packages/cli/src/context.js";
@@ -204,6 +204,44 @@ describe("CLI environment operations (against an in-process hub)", () => {
     const newest = before.history[0]!;
     assert.ok(await hubReadVersion(target("alice"), newest.version), "history opens under the new key");
     await assert.rejects(hubRotate(target("alice"), ["nobody"]), /doesn't have access/);
+  });
+
+  it("push --groups reads `# @group` lines and pull --groups writes them; without the flag the lines are left alone", async () => {
+    await hubCreateEnv(as("alice"), "app", "marks", orgId);
+    const read = () => hubGetEnv(as("alice"), "app", "marks", orgId);
+    const file = join(root, "marks.env");
+    writeFileSync(file, "LOG=info\n\n# @group db\nDB_URL=u\nDB_PASS=p\n\n# @group queue\nQ=1\n");
+
+    // no flag: the markers are plain comments, nothing is grouped, and the caller is told
+    const plain = await pushTarget(as("alice"), { project: "app", env: "marks", file, tenantId: orgId });
+    assert.equal(plain.markersIgnored, true);
+    assert.deepEqual((await read()).groups, {});
+
+    const grouped = await pushTarget(as("alice"), { project: "app", env: "marks", file, tenantId: orgId, groups: true });
+    assert.equal(grouped.markersIgnored, false);
+    let now = await read();
+    assert.deepEqual(now.groups, { DB_URL: "db", DB_PASS: "db", Q: "queue" });
+    assert.deepEqual(now.labels, ["db", "queue"]); // the names join the registry, which also keeps names added elsewhere
+
+    // a name registered in the dashboard survives a push with groups, and a key left out of a section drops back to default
+    await hubSaveEnv(as("alice"), "app", "marks", now.env, { groups: now.groups, labels: [...now.labels, "extra"] }, orgId, now.updatedAt);
+    writeFileSync(file, "LOG=info\nDB_URL=u\n# @group queue\nQ=1\n");
+    await pushTarget(as("alice"), { project: "app", env: "marks", file, tenantId: orgId, groups: true });
+    now = await read();
+    assert.deepEqual(now.groups, { Q: "queue" });
+    assert.deepEqual(now.labels, ["db", "extra", "queue"]);
+
+    // a bad marker stops the push before anything is saved
+    writeFileSync(file, "# @group Bad Name\nA=1\n");
+    await assert.rejects(pushTarget(as("alice"), { project: "app", env: "marks", file, tenantId: orgId, groups: true }), /Line 1/);
+    assert.deepEqual((await read()).groups, { Q: "queue" });
+
+    // pull: plain by default, markers with the flag, and a round trip
+    const out = join(root, "marks.out.env");
+    await pullTarget(as("alice"), { project: "app", env: "marks", file: out, merge: false, tenantId: orgId });
+    assert.ok(!readFileSync(out, "utf8").includes("@group"));
+    await pullTarget(as("alice"), { project: "app", env: "marks", file: out, merge: false, tenantId: orgId, groups: true });
+    assert.equal(readFileSync(out, "utf8"), "DB_URL=u\nLOG=info\n\n# @group queue\nQ=1\n");
   });
 
   it("keeps key groups and the registry when a key is changed, a file is pushed, a version is restored or the key is rotated", async () => {

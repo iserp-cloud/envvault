@@ -409,3 +409,76 @@ func TestPushKeepsTheDashboardsRegistryOfGroupNames(t *testing.T) {
 		t.Fatalf("the push erased the registry: %v", got.Labels)
 	}
 }
+
+// Group names and the dashboard's list of them are how the vault is organised, not part of what a cluster gets:
+// a Secret or ConfigMap holds the group's keys and values and nothing that says which group, or which other
+// groups, there are.
+func TestNothingAboutGroupsReachesTheCluster(t *testing.T) {
+	e := setupLinks(t, "prod")
+	registry := []string{"api", "db", "queue", "unused-name"}
+	e.setEnv(t, vault.Env{Vars: e.v.Environment.Expected, Groups: testGroups, Labels: registry})
+	e.h.links = []vault.AgentLink{
+		e.groupLink("def", "app-default", "pull", "", "Secret"),
+		e.groupLink("db", "app-db", "pull", "db", "Secret"),
+		e.groupLink("api", "app-api", "pull", "api", "ConfigMap"),
+		e.groupLink("empty", "app-queue", "pull", "queue", "Secret"), // registered, no keys: nothing is written
+	}
+	e.poll(t)
+	for _, id := range []string{"def", "db", "api", "empty"} {
+		e.reconcile(t, id)
+	}
+
+	okLabels := map[string]bool{LinkLabel: true, ManagedByLabel: true}
+	okAnnotations := map[string]bool{annSource: true, annDigest: true}
+	check := func(what string, labels, annotations map[string]string, data map[string]string, want map[string]string) {
+		t.Helper()
+		for k, v := range labels {
+			if !okLabels[k] {
+				t.Errorf("%s: unexpected label %s=%s", what, k, v)
+			}
+		}
+		for k, v := range annotations {
+			if !okAnnotations[k] {
+				t.Errorf("%s: unexpected annotation %s=%s", what, k, v)
+			}
+		}
+		if !reflect.DeepEqual(data, want) {
+			t.Errorf("%s: data = %v, want exactly the group's keys %v", what, keysOf(data), keysOf(want))
+		}
+		for k, v := range data { // no marker or group name sneaks in as a key or a value
+			if strings.Contains(k, "@group") || strings.Contains(v, "@group") {
+				t.Errorf("%s: %s=%s", what, k, v)
+			}
+		}
+	}
+	exp := e.v.Environment.Expected
+	for _, c := range []struct {
+		name string
+		keys []string
+	}{{"app-default", []string{"MULTILINE", "UNICODE"}}, {"app-db", []string{"DATABASE_URL"}}} {
+		s, ok := e.secret("prod", c.name)
+		if !ok {
+			t.Fatalf("%s was not created", c.name)
+		}
+		want := map[string]string{}
+		for _, k := range c.keys {
+			want[k] = exp[k]
+		}
+		got := map[string]string{}
+		for k, v := range s.Data {
+			got[k] = string(v)
+		}
+		check(c.name, s.Labels, s.Annotations, got, want)
+	}
+	cm, ok := e.configMap("prod", "app-api")
+	if !ok {
+		t.Fatal("app-api was not created")
+	}
+	check("app-api", cm.Labels, cm.Annotations, cm.Data, map[string]string{"API_KEY": exp["API_KEY"], "EMPTY": exp["EMPTY"]})
+	if len(cm.BinaryData) != 0 {
+		t.Errorf("binary data = %v", cm.BinaryData)
+	}
+	if _, ok := e.secret("prod", "app-queue"); ok {
+		t.Error("a group with no keys wrote a Secret")
+	}
+}

@@ -91,7 +91,13 @@ export function registerTree(program: Command): void {
       .option("-w, --workspace <idOrSlug>", "Same as --tenant")
       .option("-n, --dry-run", "Show what would happen, including targets you have no access to")
       .option("-i, --interactive", `Choose which targets to ${direction} from a list`)
-      .option("--skip-denied", "Report targets you have no access to as skipped instead of failing");
+      .option("--skip-denied", "Report targets you have no access to as skipped instead of failing")
+      .option(
+        "--groups",
+        direction === "pull"
+          ? "Write a `# @group name` line above each group's keys"
+          : "Read `# @group name` lines as key groups",
+      );
     if (direction === "push") {
       cmd.option("--create", "Create missing projects and environments first (or set create = true in the config)");
     }

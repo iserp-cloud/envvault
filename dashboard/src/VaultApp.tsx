@@ -134,6 +134,8 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
   const [baseline, setBaseline] = useState("");
   const [baselineGroups, setBaselineGroups] = useState("{}");
   const [labels, setLabels] = useState<string[]>([]);
+  /** Which group the key list shows: "" for all of them. */
+  const [groupFilter, setGroupFilter] = useState("");
   const [baselineLabels, setBaselineLabels] = useState("[]");
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
@@ -182,6 +184,21 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     const vars = rowsToEnv(rows);
     return Object.fromEntries(groupCounts(vars, rowsToGroups(rows)).filter((g) => g.group !== "default").map((g) => [g.group, g.keys]));
   }, [rows]);
+  /** The group buttons above the key list: every group in use or registered, with how many keys each holds. */
+  const groupTabs = useMemo(() => {
+    const counts = new Map<string, number>([["default", 0]]);
+    for (const g of groupChoices) counts.set(g, 0);
+    for (const r of rows) {
+      const g = r.group.trim().toLowerCase() || "default";
+      counts.set(g, (counts.get(g) ?? 0) + 1);
+    }
+    return [...counts].map(([group, keys]) => ({ group, keys }));
+  }, [groupChoices, rows]);
+  // a filter on a group that has gone (no keys, not registered) shows everything again
+  const activeFilter = groupTabs.some((t) => t.group === groupFilter) ? groupFilter : "";
+  const visibleRows = activeFilter
+    ? rows.filter((r) => (r.group.trim().toLowerCase() || "default") === activeFilter)
+    : rows;
   const canWrite = accessLevel === "write" || accessLevel === "manage";
   const canShareEnv = hasCap(accessLevel, accessCaps, "share");
   const canRotateEnv = hasCap(accessLevel, accessCaps, "rotate");
@@ -203,12 +220,14 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
       return {
         format: result.format as ImportFormat,
         count: Object.keys(result.env).length,
+        groups: result.hasGroups ? new Set(Object.values(result.groups)).size : 0,
         error: null as string | null,
       };
     } catch (err) {
       return {
         format: null as ImportFormat | null,
         count: 0,
+        groups: 0,
         error: err instanceof Error ? err.message : "Invalid input",
       };
     }
@@ -568,7 +587,7 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     if (!canWrite) return;
     setRows((prev) => [
       ...prev,
-      { id: `new-${Date.now()}`, key: "", value: "", revealed: true, group: "" },
+      { id: `new-${Date.now()}`, key: "", value: "", revealed: true, group: activeFilter === "default" ? "" : activeFilter },
     ]);
     setStatus(null);
   }
@@ -584,12 +603,23 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     setError(null);
     setImportHint(null);
     try {
-      const { format, env } = detectAndParseImport(importText);
+      const found = detectAndParseImport(importText);
+      const { format, env } = found;
       const next = mode === "replace" ? env : { ...rowsToEnv(rows), ...env };
-      // imported text has no groups: keys that were already here keep theirs
-      setRows(toRows(next, rowsToGroups(rows)));
+      // Text that names groups decides the group of every key in it (keys outside any group go to default); text
+      // that names none leaves the groups of keys that were already here alone.
+      const before = rowsToGroups(rows);
+      const groups = { ...before };
+      if (found.hasGroups) for (const key of Object.keys(env)) delete groups[key];
+      Object.assign(groups, found.groups);
+      setRows(toRows(next, groups));
+      // names from the text join the environment's list
+      const added = Object.values(found.groups).filter((g) => !labels.includes(g));
+      if (added.length) setLabels(cleanLabels([...labels, ...added]));
+      const grouped = new Set(Object.values(found.groups)).size;
       setStatus(
-        `Imported ${Object.keys(env).length} key(s) from ${format === "json" ? "JSON" : ".env"} (${mode})`,
+        `Imported ${Object.keys(env).length} key(s) from ${format === "json" ? "JSON" : ".env"} (${mode})` +
+          (grouped ? `, ${grouped} group${grouped === 1 ? "" : "s"}` : ""),
       );
       setImportOpen(false);
       setImportText("");
@@ -600,7 +630,8 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
 
   function onExport(format: ImportFormat) {
     const env = rowsToEnv(rows);
-    const text = format === "json" ? serializeJsonExport(env) : serializeEnvExport(env);
+    const groups = rowsToGroups(rows);
+    const text = format === "json" ? serializeJsonExport(env, groups) : serializeEnvExport(env, groups);
     void navigator.clipboard.writeText(text).then(
       () => setStatus(`Copied as ${format === "json" ? "JSON" : ".env"}`),
       () => {
@@ -1168,11 +1199,12 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                       {canWrite && importOpen && (
                         <div className="mb-4 space-y-3 rounded-xl border bg-card p-4 shadow-xs">
                           <div className="flex flex-wrap items-center justify-between gap-2">
-                            <p className="text-sm font-medium">Paste .env or JSON</p>
+                            <p className="text-sm font-medium" title="Groups: `# @group name` lines in .env, or a nested object per group in JSON">Paste .env or JSON</p>
                             {detectedPreview?.format && !detectedPreview.error ? (
                               <Badge variant="success">
                                 Detected {detectedPreview.format === "json" ? "JSON" : ".env"} ·{" "}
                                 {detectedPreview.count} keys
+                                {detectedPreview.groups > 0 ? ` · ${detectedPreview.groups} group${detectedPreview.groups === 1 ? "" : "s"}` : ""}
                               </Badge>
                             ) : detectedPreview?.error ? (
                               <Badge variant="destructive">{detectedPreview.error}</Badge>
@@ -1217,12 +1249,35 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                       {groupsOpen && (
                         <GroupRegistry labels={labels} inUse={groupsInUse} canWrite={canWrite} onChange={(next) => { setLabels(next); setStatus(null); }} />
                       )}
+                      {groupTabs.length > 1 && (
+                        <div className="mb-3 flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Show keys in a group">
+                          {[{ group: "", keys: rows.length }, ...groupTabs].map((t) => (
+                            <button
+                              key={t.group || "all"}
+                              type="button"
+                              role="tab"
+                              aria-selected={activeFilter === t.group}
+                              onClick={() => setGroupFilter(t.group)}
+                              className={cn(
+                                "rounded-full border px-3 py-1 font-mono text-xs transition-colors",
+                                activeFilter === t.group
+                                  ? "border-primary bg-primary text-primary-foreground"
+                                  : "bg-card text-muted-foreground hover:text-foreground",
+                              )}
+                            >
+                              {t.group || "all"} <span className="opacity-70">{t.keys}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                       <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
                         <div className="hidden grid-cols-[minmax(8rem,1fr)_minmax(12rem,2fr)_7rem_auto] gap-2 border-b bg-muted/50 px-4 py-2.5 sm:grid text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                           <span>Key</span>
                           <span>Value</span>
                           <span title="Which Secret or ConfigMap a Kubernetes link puts this key in">Group</span>
-                          <span className="w-24 text-right">{rows.length} total</span>
+                          <span className="w-24 text-right">
+                            {activeFilter ? `${visibleRows.length} of ${rows.length}` : `${rows.length} total`}
+                          </span>
                         </div>
                         {rows.length === 0 ? (
                           <div className="px-4 py-12 text-center">
@@ -1236,8 +1291,10 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                                 : "This environment has no keys."}
                             </p>
                           </div>
+                        ) : visibleRows.length === 0 ? (
+                          <p className="px-4 py-10 text-center text-sm text-muted-foreground">No keys in “{activeFilter}”.</p>
                         ) : (
-                          rows.map((row) => (
+                          visibleRows.map((row) => (
                             <div
                               key={row.id}
                               className="group grid grid-cols-[1fr_auto] items-center gap-x-2 border-b px-3 py-1 transition-colors last:border-b-0 hover:bg-muted/40 sm:grid-cols-[minmax(8rem,1fr)_minmax(12rem,2fr)_7rem_auto] sm:gap-2"

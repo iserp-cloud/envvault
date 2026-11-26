@@ -162,6 +162,10 @@ Link `default` as the ConfigMap `app-config` and `db` as the Secret `app-db`, an
 
 **The Groups button** on an environment opens its list of group names. Add a name once (`db`) and it becomes a choice in every key's Group menu and in the link form, so nobody retypes it. A name can be registered before any key uses it, and a name that keys use cannot be removed until they move. The list is stored inside the encrypted environment too, and the operator leaves it untouched when it pushes.
 
+**Importing and filtering.** Paste a `.env` with `# @group name` lines, or JSON with an object per group, into Import and the keys land in those groups (names join the list); export writes them back the same way. Above the key list, group buttons show only one group's keys.
+
+**Nothing about groups reaches the cluster.** A Secret or ConfigMap holds the link's keys and values and the operator's own ownership labels and annotations. Group names, the list of names and the `# @group` lines are never written to it, and a test checks this.
+
 - **Every existing environment and link is in the `default` group**, so nothing changes until you use groups. A group name is 1 to 40 lowercase letters, digits or dashes, and cannot be `default`.
 - **A link carries one group and one kind** (`Secret` or `ConfigMap`). A Secret and a ConfigMap may share a name; two links to the same kind and name may not. `spec.group` and `spec.target.kind` do the same for an `EnvVaultSecret` or `EnvVaultPush`.
 - **An empty group writes nothing.** A link to a named group with no keys reports `GroupEmpty` and leaves the target alone. The `default` group may be empty.

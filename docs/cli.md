@@ -250,6 +250,7 @@ envvault get                          # everything, as dotenv text
 | `-p, --project` | config, then saved default | Project |
 | `-e, --env` | config, then `default` | Environment |
 | `-t, --tenant`, `-w, --workspace` | config, then active workspace | Workspace slug or id (it must exist) |
+| `--groups` (`push`, `pull`, `tree push`, `tree pull`) | off | `push`: read `# @group name` lines as key groups and add the names to the environment's list. `pull`: write a `# @group name` line above each group's keys. Without it the markers are ordinary comments (a push says so when the file has some). |
 | `--group` (`set` only) | unchanged | Key group for the keys being set. `push`, `set`, `unset`, restore and re-key keep the groups of the keys that stay and the environment's list of group names (a push stops if it cannot read them, instead of saving without); `pull` and `get` print the values without them. |
 | `-f, --file` | `.env`, or the config's `file` | Local file (`pull`, `push`) |
 | `--merge` | | (`pull`) merge into the existing file |
@@ -318,3 +319,18 @@ Uses SQLite by default, or Postgres via `DATABASE_URL`.
 | Crypto | Password → keys derived locally; env DEK unwrapped with your private key; payloads encrypted/decrypted in the CLI |
 
 The hub never receives your password or any decryption key — see [Security](security.md). `set` rejects the write if someone else changed the environment since you read it.
+
+### Groups in a .env file
+
+```
+LOG_LEVEL=info          # keys above the first marker are in the default group
+
+# @group db
+DATABASE_URL=postgres://…
+DB_PASSWORD=…
+
+# @group payments
+STRIPE_KEY=sk_…
+```
+
+Only a `# @group name` line of its own counts. It applies to the keys below it until the next one, and `# @group default` goes back to the default group. Plain comments, blank lines and commented-out keys mean nothing. A bad name stops the push and names the line. `envvault push --groups` makes the file's groups the environment's groups, so a key not under any marker goes back to the default group, and names the file uses join the environment's list. The dashboard's import and export read and write the same markers, and a JSON object nested under a group name (`{"db": {"DATABASE_URL": "…"}}`).

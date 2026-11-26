@@ -19,6 +19,7 @@ type SyncOpts = {
   yes?: boolean;
   skipDenied?: boolean;
   group?: string;
+  groups?: boolean;
 };
 
 const SKIP_DENIED = "Report targets you have no access to as skipped instead of failing";
@@ -44,17 +45,18 @@ export function registerData(program: Command): void {
       .argument("[project]", "Project name (same as -p)")
       .option("-f, --file <path>", "Output file (default: .env, or the file set in your config)")
       .option("--merge", "Merge into the existing file instead of replacing it")
+      .option("--groups", "Write a `# @group name` line above each group's keys")
       .option("--all", "Pull every target in envvault.toml/json, from any directory below it")
       .option("--skip-denied", SKIP_DENIED),
   ).action(async (projectArg: string | undefined, opts: SyncOpts) => {
     if (wantsWholeTree(narrowed(projectArg, opts), Boolean(opts.all))) {
-      return syncTree("pull", [], { tenant: opts.tenant, workspace: opts.workspace, skipDenied: opts.skipDenied });
+      return syncTree("pull", [], { tenant: opts.tenant, workspace: opts.workspace, skipDenied: opts.skipDenied, groups: opts.groups });
     }
     const t = await resolveTarget({ ...opts, project: opts.project ?? projectArg });
     const ctx = { ...t.ctx, merge: opts.merge ?? t.ctx.merge };
     await orSkip(opts.skipDenied, `${t.project}/${t.env}`, async () => {
       const { keys } = await pullTarget(t.config, {
-        project: t.project, env: t.env, file: ctx.file, merge: ctx.merge, tenantId: t.tenantId,
+        project: t.project, env: t.env, file: ctx.file, merge: ctx.merge, tenantId: t.tenantId, groups: opts.groups,
       });
       success(`Pulled ${plural(keys, "var")} → ${rel(ctx.file)}  ${c.dim(`(${t.project}/${t.env})`)}`);
     });
@@ -68,11 +70,12 @@ export function registerData(program: Command): void {
       .option("-f, --file <path>", "Source file (default: .env, or the file set in your config)")
       .option("--all", "Push every target in envvault.toml/json, from any directory below it")
       .option("-y, --yes", "Don't ask before pushing an empty file")
+      .option("--groups", "Read `# @group name` lines as key groups (names join the environment's list of groups)")
       .option("--create", "Create the project / environment first if it doesn't exist (or set create = true in the config)")
       .option("--skip-denied", SKIP_DENIED),
   ).action(async (projectArg: string | undefined, opts: SyncOpts) => {
     if (wantsWholeTree(narrowed(projectArg, opts), Boolean(opts.all))) {
-      return syncTree("push", [], { tenant: opts.tenant, workspace: opts.workspace, skipDenied: opts.skipDenied, create: opts.create });
+      return syncTree("push", [], { tenant: opts.tenant, workspace: opts.workspace, skipDenied: opts.skipDenied, groups: opts.groups, create: opts.create });
     }
     const t = await resolveTarget({ ...opts, project: opts.project ?? projectArg });
     if (!existsSync(t.ctx.file)) throw new Error(`File not found: ${rel(t.ctx.file)}`);
@@ -84,10 +87,11 @@ export function registerData(program: Command): void {
       if (!ok) return hint("Cancelled.");
     }
     await orSkip(opts.skipDenied, `${t.project}/${t.env}`, async () => {
-      const { keys, updatedAt, created } = await pushTarget(t.config, {
-        project: t.project, env: t.env, file: t.ctx.file, tenantId: t.tenantId, create: t.ctx.create,
+      const { keys, updatedAt, created, markersIgnored } = await pushTarget(t.config, {
+        project: t.project, env: t.env, file: t.ctx.file, tenantId: t.tenantId, create: t.ctx.create, groups: opts.groups,
       });
       success(`Pushed ${plural(keys, "var")} ← ${rel(t.ctx.file)}  ${c.dim(`(${t.project}/${t.env}, ${updatedAt})`)}${created ? `  ${c.green(`created ${created}`)}` : ""}`);
+      if (markersIgnored) hint("The file has # @group lines that were left out; add --groups to apply them.");
     });
   });
 

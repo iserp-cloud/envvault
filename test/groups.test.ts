@@ -2,6 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_GROUP,
+  hasGroupMarkers,
+  parseEnvGroups,
+  serializeEnv,
+  serializeEnvGroups,
   cleanLabels,
   envAad,
   generateDek,
@@ -106,5 +110,41 @@ describe("key groups", () => {
     assert.deepEqual(knownGroups(["queue"], { A: "db", B: "db", C: "api" }), ["api", "db", "queue"]);
     assert.deepEqual(knownGroups([], {}), []);
     assert.deepEqual(cleanLabels(["b", "a", "b", "default", "NOPE_X"]), ["a", "b"]);
+  });
+});
+
+describe("# @group markers in .env text", () => {
+  it("keys above the first marker are default; a marker applies until the next; `default` ends a section", () => {
+    const text = "A=1\n\n# @group db\nB=2\nC=3\n# a plain comment\n# @group default\nD=4\n# @group queue\nE=5\n";
+    assert.deepEqual(parseEnvGroups(text), {
+      vars: { A: "1", B: "2", C: "3", D: "4", E: "5" },
+      groups: { B: "db", C: "db", E: "queue" },
+    });
+  });
+
+  it("plain comments, blank lines and commented-out keys never make a group", () => {
+    const text = "# Database\nA=1\n\n\n# @groupish\n# (db)\n# OLD=1\nB=2\n";
+    assert.deepEqual(parseEnvGroups(text), { vars: { A: "1", B: "2" }, groups: {} });
+    assert.equal(hasGroupMarkers(text), false);
+    assert.equal(hasGroupMarkers("# @group db\nA=1"), true);
+  });
+
+  it("a bad marker is an error that names the line", () => {
+    assert.throws(() => parseEnvGroups("A=1\n# @group Bad Name\nB=2"), /Line 2/);
+    assert.throws(() => parseEnvGroups("# @group\nA=1"), /Line 1.*needs a group name/);
+    assert.throws(() => parseEnvGroups("# @group a_b\nA=1"), /Line 1/);
+  });
+
+  it("serialises the default keys first, then a section per group, and round-trips", () => {
+    const vars = { LOG: "info", DB_URL: "u", DB_PASS: "p", STRIPE: "s" };
+    const groups = { DB_URL: "db", DB_PASS: "db", STRIPE: "payments" };
+    const text = serializeEnvGroups(vars, groups);
+    assert.equal(text, "LOG=info\n\n# @group db\nDB_PASS=p\nDB_URL=u\n\n# @group payments\nSTRIPE=s\n");
+    assert.deepEqual(parseEnvGroups(text), { vars, groups });
+    assert.equal(serializeEnvGroups(vars, {}), serializeEnv(vars)); // no groups: exactly the plain file
+  });
+
+  it("a group with no keys is not written", () => {
+    assert.equal(serializeEnvGroups({ A: "1" }, { B: "db" }), "A=1\n");
   });
 });
