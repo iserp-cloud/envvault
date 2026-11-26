@@ -6,6 +6,49 @@ import { getSetting, setSetting } from "./settings.js";
 export const SCHEMA_VERSION = "zk-6";
 
 export async function ensureSchema(db: Kysely<DbSchema>): Promise<void> {
+  await ensureSchemaCore(db);
+  await ensureK8sTables(db);
+}
+
+/** Kubernetes links: new tables only, so they are added to a database already at the current version. */
+async function ensureK8sTables(db: Kysely<DbSchema>): Promise<void> {
+  await sql`
+    CREATE TABLE IF NOT EXISTS k8s_links (
+      id TEXT PRIMARY KEY NOT NULL,
+      tenant_id TEXT NOT NULL,
+      project_name TEXT NOT NULL,
+      env_name TEXT NOT NULL,
+      cluster TEXT NOT NULL,
+      namespace TEXT NOT NULL,
+      secret_name TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT '',
+      status_message TEXT NOT NULL DEFAULT '',
+      key_count INTEGER NOT NULL DEFAULT 0,
+      reported_at TEXT NOT NULL DEFAULT '',
+      adopt INTEGER NOT NULL DEFAULT 0
+    )
+  `.execute(db);
+  // One writer per Secret: a Secret is the target of one link, which also stops a pull and a push from looping.
+  await addColumn(db, "k8s_links", "adopt", "INTEGER NOT NULL DEFAULT 0");
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS k8s_links_secret_idx ON k8s_links (cluster, namespace, secret_name)`.execute(db);
+  await sql`CREATE INDEX IF NOT EXISTS k8s_links_env_idx ON k8s_links (tenant_id, project_name, env_name)`.execute(db);
+  await ensureOnePushPerEnvironment(db);
+  await sql`
+    CREATE TABLE IF NOT EXISTS k8s_clusters (
+      cluster TEXT PRIMARY KEY NOT NULL,
+      tenant_id TEXT NOT NULL,
+      last_seen TEXT NOT NULL,
+      version TEXT NOT NULL DEFAULT '',
+      namespaces TEXT NOT NULL DEFAULT '[]',
+      token_expires_at TEXT NOT NULL DEFAULT ''
+    )
+  `.execute(db);
+}
+
+async function ensureSchemaCore(db: Kysely<DbSchema>): Promise<void> {
   try {
     if ((await getSetting(db, "schema_version")) === SCHEMA_VERSION) return;
   } catch {
@@ -227,4 +270,38 @@ async function assertNotLegacy(db: Kysely<DbSchema>): Promise<void> {
       "This database was created by an older EnvVault (server-side encryption) and is not compatible with zero-knowledge mode. Point DATABASE_URL / ENVVAULT_DB at a new, empty database and re-create accounts.",
     );
   }
+}
+
+/**
+ * One push link per environment, enforced by the database so two simultaneous requests cannot both
+ * succeed. A database that already holds two pushes into one environment (made before the rule
+ * existed) keeps them and starts anyway: the index is left out, a warning names the links, and the
+ * rule still holds for new ones through the check in the link handler. Remove the extra links and the
+ * index is made on the next start.
+ */
+async function ensureOnePushPerEnvironment(db: Kysely<DbSchema>): Promise<void> {
+  const dup = await sql<{ tenant_id: string; project_name: string; env_name: string; links: string }>`
+    SELECT tenant_id, project_name, env_name,
+           group_concat(namespace || '/' || secret_name, ', ') AS links
+    FROM k8s_links WHERE direction = 'push'
+    GROUP BY tenant_id, project_name, env_name HAVING COUNT(*) > 1
+  `.execute(db).catch(async () => {
+    // Postgres has no group_concat.
+    return sql<{ tenant_id: string; project_name: string; env_name: string; links: string }>`
+      SELECT tenant_id, project_name, env_name,
+             string_agg(namespace || '/' || secret_name, ', ') AS links
+      FROM k8s_links WHERE direction = 'push'
+      GROUP BY tenant_id, project_name, env_name HAVING COUNT(*) > 1
+    `.execute(db);
+  });
+  if (dup.rows.length > 0) {
+    for (const d of dup.rows) {
+      console.warn(
+        `WARNING: ${d.project_name}/${d.env_name} has several Secret -> Vault links (${d.links}); they overwrite each other's keys. ` +
+          "Unlink all but one in the dashboard; the hub then enforces one push link per environment.",
+      );
+    }
+    return;
+  }
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS k8s_links_one_push_idx ON k8s_links (tenant_id, project_name, env_name) WHERE direction = 'push'`.execute(db);
 }

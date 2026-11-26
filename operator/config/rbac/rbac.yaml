@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: envvault-operator
+  namespace: envvault-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: envvault-operator
+rules:
+  - apiGroups: [envvault.io]
+    resources: [envvaultsecrets, envvaultpushes]
+    verbs: [get, list, watch]
+  - apiGroups: [envvault.io]
+    resources: [envvaultsecrets/status, envvaultpushes/status]
+    verbs: [get, update, patch]
+  # Reads the token and CA Secrets you point at, and writes the Secrets it manages.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, update, patch]
+  # Only used with links from the dashboard: lists namespaces so the dashboard can offer them.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list]
+  # Events shown by `kubectl describe` on a failure, an update or a recovery.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  # Only used for `restartOn`; drop this rule if you don't use it.
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: envvault-operator
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: envvault-operator }
+subjects:
+  - { kind: ServiceAccount, name: envvault-operator, namespace: envvault-system }
+---
+# Only needed with --leader-elect (more than one replica).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: envvault-operator-leader
+  namespace: envvault-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: envvault-operator-leader
+  namespace: envvault-system
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: envvault-operator-leader }
+subjects:
+  - { kind: ServiceAccount, name: envvault-operator, namespace: envvault-system }
+---
+# Reads the optional ConfigMap that limits the namespaces dashboard links may use. Only this one object.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: envvault-operator-config
+  namespace: envvault-system
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [envvault-config]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: envvault-operator-config
+  namespace: envvault-system
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: envvault-operator-config }
+subjects:
+  - { kind: ServiceAccount, name: envvault-operator, namespace: envvault-system }

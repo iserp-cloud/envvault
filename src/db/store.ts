@@ -14,6 +14,7 @@ export {
   purgeExpiredSessions,
   listServiceAccounts,
   latestSessionExpiry,
+  extendSessions,
   listSessionsForUser,
   revokeSessionById,
   revokeOtherSessions,

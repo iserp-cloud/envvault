@@ -160,6 +160,15 @@ describe("zero-knowledge hub", () => {
     assert.equal(again.privateKey, admin.privateKey);
   });
 
+  it("correct sign-ins don't use up the attempt limit (every unlock is a sign-in)", async () => {
+    await db.deleteFrom("rate_limits").execute();
+    for (let i = 0; i < 12; i++) await login("alice"); // more than the 8 allowed guesses per address and account
+    await db.deleteFrom("rate_limits").execute();
+    for (let i = 0; i < 8; i++) await assert.rejects(login("alice", "wrong password!!"), /Invalid username or password/);
+    await assert.rejects(login("alice", "wrong password!!"), /Too many attempts/); // guesses still run out
+    await db.deleteFrom("rate_limits").execute();
+  });
+
   it("stores only ciphertext", async () => {
     const tid = "p_alice";
     await makeProject(admin, tid, "billing", { STRIPE_KEY: "sk_live_TOPSECRET" });
@@ -455,6 +464,9 @@ describe("zero-knowledge hub", () => {
 
     // …but cannot do human things.
     assert.equal((await svc.api.me()).kind, "service");
+    const left = Date.parse((await svc.api.me()).expiresAt) - Date.now();
+    assert.ok(left > 29 * 86_400_000 && left <= 30 * 86_400_000, "a service token reports when it expires");
+    assert.equal((await admin.api.me()).expiresAt, undefined);
     await assert.rejects(svc.api.tenants.create({ name: "evilcorp" }), /service accounts/i);
     await assert.rejects(svc.api.admin.users.list(), /Administrator access required/);
     await assert.rejects(svc.api.environments.saveEnv({
@@ -507,6 +519,243 @@ describe("zero-knowledge hub", () => {
     await assert.rejects(svc.environments.create({ ...loc, name: "extra", payload, keyWraps: [{ username: created.username, wrappedEnvDek: wrapped }] }), /service accounts/i);
     await assert.rejects(svc.projects.delete({ tenantId: tid, name: "api" }), /service accounts/i);
     await admin.api.serviceAccounts.revoke({ tenantId: tid, username: created.username });
+  });
+
+  it("kubernetes links: the hub keeps the mapping, the operator reports back, unlinking revokes", async () => {
+    const org = (await admin.api.tenants.list()).find((t: any) => t.slug === "acme");
+    const tid = org.id;
+    const loc = { tenantId: tid, project: "api", name: "default" };
+    const keys = await generateIdentityKeyPair();
+    const cluster = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-main", publicKey: keys.publicKey, expiresInDays: 30 });
+    assert.equal(cluster.username, "svc-k8s-main");
+    const list = await admin.api.environments.list({ tenantId: tid, project: "api" });
+    const dek = await unwrapSecretWithPrivateKey(list[0].wrappedEnvDek, admin.privateKey);
+    const link = { ...loc, cluster: cluster.username, namespace: "prod", secretName: "api-env", direction: "pull" };
+
+    // The cluster token must hold the key first: the hub cannot wrap one.
+    await assert.rejects(admin.api.k8s.links.create(link), /needs read access/);
+    await grantAccess(admin.api, { ...loc, username: cluster.username, level: "read", wrappedEnvDek: await wrapSecretForPublicKey(dek, keys.publicKey) });
+    const made = await admin.api.k8s.links.create(link);
+    assert.equal(made.status, "");
+    await assert.rejects(admin.api.k8s.links.create(link), /already linked/);
+    await assert.rejects(admin.api.k8s.links.create({ ...link, secretName: "b", direction: "push" }), /needs write access/);
+    await assert.rejects(admin.api.k8s.links.create({ ...link, secretName: "Bad_Name" }), /Input validation failed/);
+
+    // Not a person's job to impersonate the operator, nor the operator's to manage links.
+    const agent = client(cluster.token);
+    await assert.rejects(agent.k8s.links.create({ ...link, secretName: "x" }), /service accounts/i);
+    await assert.rejects(admin.api.k8s.agent.sync({}), /cluster token/);
+
+    // The operator polls: it is seen, tells which namespaces it may use, and receives its links.
+    const got = await agent.k8s.agent.sync({ version: "0.2.0", namespaces: ["prod", "staging"] });
+    assert.deepEqual(got.map((l: any) => [l.namespace, l.secretName, l.direction, l.project, l.environment]), [["prod", "api-env", "pull", "api", "default"]]);
+    await assert.rejects(admin.api.k8s.links.create({ ...link, namespace: "kube-system", secretName: "y" }), /may not use the namespace/);
+    const clusters = await admin.api.k8s.clusters.list({ tenantId: tid });
+    assert.deepEqual(clusters.map((c: any) => [c.cluster, c.version, c.namespaces, c.lastSeen !== null]), [["svc-k8s-main", "0.2.0", ["prod", "staging"], true]]);
+
+    // It reports status (a short reason and a count; never values), shown on the environment.
+    await agent.k8s.agent.report({ reports: [{ id: made.id, status: "Synced", message: "Secret is up to date", keyCount: 3 }, { id: "someone-elses", status: "Synced" }] });
+    const shown = (await admin.api.k8s.links.list(loc))[0];
+    assert.deepEqual([shown.status, shown.keyCount, shown.reportedAt !== ""], ["Synced", 3, true]);
+
+    // Unlinking removes the mapping and the cluster token's access to that environment.
+    assert.equal((await admin.api.k8s.links.delete({ tenantId: tid, id: made.id })).revoked, true);
+    assert.deepEqual(await admin.api.k8s.links.list(loc), []);
+    assert.deepEqual(await agent.k8s.agent.sync({ namespaces: [] }), []);
+    await assert.rejects(agent.environments.getEnv(loc), /No access|Requires/);
+    await admin.api.serviceAccounts.revoke({ tenantId: tid, username: cluster.username });
+  });
+
+  it("kubernetes cluster tokens: extend a live one, replace one that expired", async () => {
+    const org = (await admin.api.tenants.list()).find((t: any) => t.slug === "acme");
+    const tid = org.id;
+    const loc = { tenantId: tid, project: "api", name: "default" };
+    const list = await admin.api.environments.list({ tenantId: tid, project: "api" });
+    const dek = await unwrapSecretWithPrivateKey(list[0].wrappedEnvDek, admin.privateKey);
+    const old = await generateIdentityKeyPair();
+    const oldAcct = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-old", publicKey: old.publicKey, expiresInDays: 5 });
+    await grantAccess(admin.api, { ...loc, username: oldAcct.username, level: "write", wrappedEnvDek: await wrapSecretForPublicKey(dek, old.publicKey) });
+    const made = await admin.api.k8s.links.create({ ...loc, cluster: oldAcct.username, namespace: "prod", secretName: "api-env", direction: "push" });
+
+    // Extending is the same token with more time: the hub's own record shows it at once.
+    const agent = client(oldAcct.token);
+    const before = (await agent.me()).expiresAt;
+    const ext = await admin.api.k8s.clusters.extend({ tenantId: tid, cluster: oldAcct.username, expiresInDays: 365 });
+    assert.ok(ext.expiresAt > before);
+    assert.equal((await agent.me()).expiresAt, ext.expiresAt);
+    assert.equal((await admin.api.k8s.clusters.list({ tenantId: tid })).find((c: any) => c.cluster === oldAcct.username).expiresAt, ext.expiresAt);
+    await assert.rejects(admin.api.k8s.clusters.extend({ tenantId: tid, cluster: "svc-nobody" }), /Not a cluster token/);
+
+    // A replacement must hold the same access first; then the links move with their ids.
+    const fresh = await generateIdentityKeyPair();
+    const newAcct = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-new", publicKey: fresh.publicKey, expiresInDays: 365 });
+    const carried = await admin.api.k8s.clusters.links({ tenantId: tid, cluster: oldAcct.username });
+    assert.deepEqual(carried.map((l: any) => l.id), [made.id]);
+    await assert.rejects(admin.api.k8s.clusters.replace({ tenantId: tid, from: oldAcct.username, to: newAcct.username }), /no access yet to: api\/default/);
+    await grantAccess(admin.api, { ...loc, username: newAcct.username, level: "write", wrappedEnvDek: await wrapSecretForPublicKey(dek, fresh.publicKey) });
+    await assert.rejects(admin.api.k8s.clusters.replace({ tenantId: tid, from: oldAcct.username, to: oldAcct.username }), /different token/);
+    assert.equal((await admin.api.k8s.clusters.replace({ tenantId: tid, from: oldAcct.username, to: newAcct.username })).moved, 1);
+    const moved = await client(newAcct.token).k8s.agent.sync({ namespaces: ["prod"] });
+    assert.deepEqual(moved.map((l: any) => l.id), [made.id]);
+    assert.deepEqual(await agent.k8s.agent.sync({ namespaces: [] }), []);
+
+    // Once a token is gone (expired or revoked) it cannot be extended.
+    await admin.api.serviceAccounts.revoke({ tenantId: tid, username: oldAcct.username });
+    await assert.rejects(admin.api.k8s.clusters.extend({ tenantId: tid, cluster: oldAcct.username }), /already expired/);
+
+    await admin.api.k8s.links.delete({ tenantId: tid, id: made.id });
+    await admin.api.serviceAccounts.revoke({ tenantId: tid, username: newAcct.username });
+  });
+
+  it("kubernetes links go away with their environment, project or cluster token", async () => {
+    const org = await admin.api.tenants.create({ name: "k8s-cleanup" });
+    const tid = org.id;
+    const me = (await admin.api.tenants.keyRecipients({ tenantId: tid })).find((r: any) => r.username === "alice");
+    const keys = await generateIdentityKeyPair();
+    const acct = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-c", publicKey: keys.publicKey, expiresInDays: 30 });
+    const dekOf = await makeProject(admin, tid, "p", { A: "1" });
+    const staging = generateDek();
+    await admin.api.environments.create({
+      tenantId: tid, project: "p", name: "staging",
+      payload: await sealEnv({ B: "2" }, staging, envAad(tid, "p", "staging")),
+      keyWraps: [{ username: "alice", wrappedEnvDek: await wrapSecretForPublicKey(staging, me.publicKey) }],
+    });
+    const stagingDek = staging;
+    const linkTo = async (project: string, env: string, dek: string, secretName: string) => {
+      await grantAccess(admin.api, { tenantId: tid, project, name: env, username: acct.username, level: "read", wrappedEnvDek: await wrapSecretForPublicKey(dek, keys.publicKey) });
+      return admin.api.k8s.links.create({ tenantId: tid, project, name: env, cluster: acct.username, namespace: "ns", secretName, direction: "pull" });
+    };
+    await linkTo("p", "default", dekOf, "one");
+    await linkTo("p", "staging", stagingDek, "two");
+    const agent = client(acct.token);
+    assert.equal((await agent.k8s.agent.sync({ namespaces: ["ns"] })).length, 2);
+
+    // Deleting an environment takes its links, and frees the Secret name.
+    await admin.api.environments.delete({ tenantId: tid, project: "p", name: "staging" });
+    assert.deepEqual((await agent.k8s.agent.sync({ namespaces: ["ns"] })).map((l: any) => l.secretName), ["one"]);
+
+    // Deleting the project takes the rest.
+    await admin.api.projects.delete({ tenantId: tid, name: "p" });
+    assert.deepEqual(await agent.k8s.agent.sync({ namespaces: ["ns"] }), []);
+
+    // Revoking a cluster token takes its links, and its heartbeat row.
+    const dek2 = await makeProject(admin, tid, "q", { A: "1" });
+    await linkTo("q", "default", dek2, "three");
+    await admin.api.serviceAccounts.revoke({ tenantId: tid, username: acct.username });
+    assert.deepEqual(await admin.api.k8s.links.list({ tenantId: tid, project: "q", name: "default" }), []);
+    const left = await admin.api.k8s.clusters.list({ tenantId: tid });
+    assert.deepEqual(left.map((c: any) => [c.status, c.lastSeen]), [["disabled", null]]);
+  });
+
+  it("a pull link can be allowed to take over a Secret that already exists", async () => {
+    const org = await admin.api.tenants.create({ name: "k8s-adopt" });
+    const tid = org.id;
+    const keys = await generateIdentityKeyPair();
+    const acct = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-a", publicKey: keys.publicKey, expiresInDays: 30 });
+    const dek = await makeProject(admin, tid, "p", { A: "1" });
+    const wrapped = await wrapSecretForPublicKey(dek, keys.publicKey);
+    await grantAccess(admin.api, { tenantId: tid, project: "p", name: "default", username: acct.username, level: "write", wrappedEnvDek: wrapped });
+    const make = (secretName: string, direction: "pull" | "push", adopt?: boolean) =>
+      admin.api.k8s.links.create({ tenantId: tid, project: "p", name: "default", cluster: acct.username, namespace: "ns", secretName, direction, ...(adopt === undefined ? {} : { adopt }) });
+
+    const plain = await make("plain", "pull");
+    const taking = await make("taking", "pull", true);
+    const push = await make("src", "push", true); // a push never takes anything over
+    assert.deepEqual([plain.adopt, taking.adopt, push.adopt], [false, true, false]);
+
+    const agent = client(acct.token);
+    const seen = (await agent.k8s.agent.sync({ namespaces: ["ns"] })).map((l: any) => [l.secretName, l.adopt]);
+    assert.deepEqual(seen.sort(), [["plain", false], ["src", false], ["taking", true]]);
+
+    // A conflicted link can be switched on afterwards, and off again; a push link cannot.
+    assert.equal((await admin.api.k8s.links.adopt({ tenantId: tid, id: plain.id, adopt: true })).adopt, true);
+    assert.equal((await agent.k8s.agent.sync({ namespaces: ["ns"] })).find((l: any) => l.id === plain.id).adopt, true);
+    assert.equal((await admin.api.k8s.links.adopt({ tenantId: tid, id: plain.id, adopt: false })).adopt, false);
+    await assert.rejects(() => admin.api.k8s.links.adopt({ tenantId: tid, id: push.id, adopt: true }), /writes a Secret/);
+
+    // Someone who may not share the environment cannot change it.
+    await assert.rejects(() => bob.api.k8s.links.adopt({ tenantId: tid, id: plain.id, adopt: true }));
+  });
+
+  it("one environment can be linked both ways, in either order, and the token keeps the access it needs", async () => {
+    const org = await admin.api.tenants.create({ name: "k8s-both" });
+    const tid = org.id;
+    const keys = await generateIdentityKeyPair();
+    const acct = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-b", publicKey: keys.publicKey, expiresInDays: 30 });
+    const dek = await makeProject(admin, tid, "p", { A: "1" });
+    const wrapped = await wrapSecretForPublicKey(dek, keys.publicKey);
+    const grant = (level: "read" | "write") =>
+      grantAccess(admin.api, { tenantId: tid, project: "p", name: "default", username: acct.username, level, wrappedEnvDek: wrapped });
+    const link = (secretName: string, direction: "pull" | "push") =>
+      admin.api.k8s.links.create({ tenantId: tid, project: "p", name: "default", cluster: acct.username, namespace: "ns", secretName, direction });
+    const level = async () =>
+      (await admin.api.environments.listAccess({ tenantId: tid, project: "p", name: "default" })).find((a: any) => a.username === acct.username)?.level;
+
+    // What the dashboard does: grant first (replacing whatever the token had), then link.
+    await grant("write");
+    const push = await link("out", "push");
+    await grant("read"); // the pull link's own grant would demote the token here
+    const pull = await link("in", "pull");
+    assert.equal(await level(), "write", "the push link still needs write after a pull link is added");
+
+    // Removing the push link drops the token to what the pull link needs.
+    await admin.api.k8s.links.delete({ tenantId: tid, id: push.id });
+    assert.equal(await level(), "read");
+    // Removing the last link revokes the access.
+    await admin.api.k8s.links.delete({ tenantId: tid, id: pull.id });
+    assert.equal(await level(), undefined);
+
+    // The other order: pull first, then push.
+    await grant("read");
+    await link("in", "pull");
+    await grant("write");
+    await link("out", "push");
+    assert.equal(await level(), "write");
+  });
+
+  it("only one Secret can push into an environment; pulls are unlimited", async () => {
+    const org = await admin.api.tenants.create({ name: "k8s-one-push" });
+    const tid = org.id;
+    const keys = await generateIdentityKeyPair();
+    const acct = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-one", publicKey: keys.publicKey, expiresInDays: 30 });
+    const dek = await makeProject(admin, tid, "p", { A: "1" });
+    await grantAccess(admin.api, {
+      tenantId: tid, project: "p", name: "default", username: acct.username, level: "write",
+      wrappedEnvDek: await wrapSecretForPublicKey(dek, keys.publicKey),
+    });
+    const link = (namespace: string, secretName: string, direction: "pull" | "push") =>
+      admin.api.k8s.links.create({ tenantId: tid, project: "p", name: "default", cluster: acct.username, namespace, secretName, direction });
+
+    const first = await link("ns-a", "out-a", "push");
+    await assert.rejects(link("ns-b", "out-b", "push"), /already receives from ns-a\/out-a.*Only one Secret/s);
+    await link("ns-a", "in-1", "pull"); // pulls only copy the environment out, so any number is fine
+    await link("ns-b", "in-2", "pull");
+
+    // Once the push link is gone another Secret may take its place (the dashboard grants write again first).
+    await admin.api.k8s.links.delete({ tenantId: tid, id: first.id });
+    await grantAccess(admin.api, {
+      tenantId: tid, project: "p", name: "default", username: acct.username, level: "write",
+      wrappedEnvDek: await wrapSecretForPublicKey(dek, keys.publicKey),
+    });
+    await link("ns-b", "out-b", "push");
+  });
+
+  it("the database lets only one of two simultaneous push links through", async () => {
+    const org = await admin.api.tenants.create({ name: "k8s-race" });
+    const tid = org.id;
+    const keys = await generateIdentityKeyPair();
+    const acct = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-race", publicKey: keys.publicKey, expiresInDays: 30 });
+    const dek = await makeProject(admin, tid, "p", { A: "1" });
+    await grantAccess(admin.api, {
+      tenantId: tid, project: "p", name: "default", username: acct.username, level: "write",
+      wrappedEnvDek: await wrapSecretForPublicKey(dek, keys.publicKey),
+    });
+    const push = (secretName: string) =>
+      admin.api.k8s.links.create({ tenantId: tid, project: "p", name: "default", cluster: acct.username, namespace: "ns", secretName, direction: "push" });
+    const results = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => push(`race-${i}`)));
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, "exactly one push link exists");
+    for (const r of results) if (r.status === "rejected") assert.match(String(r.reason?.message), /already receives from ns\/race-\d.*Only one Secret/s);
+    assert.equal((await admin.api.k8s.links.list({ tenantId: tid, project: "p", name: "default" })).length, 1);
   });
 
   it("deleting a project needs owner/admin or manage on every environment", async () => {
@@ -793,6 +1042,55 @@ describe("schema upgrade", () => {
       assert.deepEqual(await old.selectFrom("environment_versions").selectAll().execute(), []);
       await old.insertInto("environment_acl").values({ tenant_id: "t", project_name: "p", env_name: "default", username: "u", level: "write", caps: "" }).execute();
       assert.equal((await old.selectFrom("environment_acl").selectAll().executeTakeFirstOrThrow()).caps, "", "existing grants keep their level and gain no capabilities");
+    } finally {
+      rmSync(upgradeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a database with two pushes into one environment still starts, names them, and keeps the rule for new links", async () => {
+    const { ensureSchema } = await import("../src/db/store.js");
+    const { sql } = await import("kysely");
+    const dir = mkdtempSync(join(tmpdir(), "envvault-dup-"));
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (m: unknown) => void warnings.push(String(m));
+    try {
+      const old = await openDb(join(dir, "vault.db"));
+      await sql`DROP INDEX IF EXISTS k8s_links_one_push_idx`.execute(old);
+      const ins = (id: string, secret: string) =>
+        sql`INSERT INTO k8s_links (id, tenant_id, project_name, env_name, cluster, namespace, secret_name, direction, created_by, created_at)
+            VALUES (${id}, 't', 'p', 'default', 'svc-k8s-x', 'ns', ${secret}, 'push', 'alice', '2020-01-01T00:00:00.000Z')`.execute(old);
+      await ins("a", "first");
+      await ins("b", "second"); // made before the rule existed
+
+      await ensureSchema(old); // must not throw
+      assert.ok(warnings.some((w) => /p\/default.*first.*second|p\/default.*second.*first/.test(w)), `warned: ${warnings.join(" | ")}`);
+      await ins("c", "third"); // no index yet, so the database does not object; the handler check does
+
+      // Clean up to one and the next start makes the index.
+      await sql`DELETE FROM k8s_links WHERE id IN ('b', 'c')`.execute(old);
+      await ensureSchema(old);
+      await assert.rejects(ins("d", "fourth"), /UNIQUE|unique/);
+    } finally {
+      console.warn = realWarn;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("adds the take-over column to a links table made before it existed", async () => {
+    const { ensureSchema } = await import("../src/db/store.js");
+    const { sql } = await import("kysely");
+    const upgradeDir = mkdtempSync(join(tmpdir(), "envvault-upgrade-"));
+    try {
+      const old = await openDb(join(upgradeDir, "vault.db"));
+      await sql`ALTER TABLE k8s_links DROP COLUMN adopt`.execute(old);
+      await sql`INSERT INTO k8s_links (id, tenant_id, project_name, env_name, cluster, namespace, secret_name, direction, created_by, created_at)
+                VALUES ('l', 't', 'p', 'default', 'svc-k8s-x', 'ns', 's', 'pull', 'alice', '2020-01-01T00:00:00.000Z')`.execute(old);
+
+      await ensureSchema(old);
+
+      const row = await old.selectFrom("k8s_links").selectAll().executeTakeFirstOrThrow();
+      assert.equal(Number(row.adopt), 0, "existing links keep refusing to touch a Secret they did not write");
     } finally {
       rmSync(upgradeDir, { recursive: true, force: true });
     }

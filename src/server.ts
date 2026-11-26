@@ -217,6 +217,22 @@ export async function startServer(options: ServeOptions = {}): Promise<void> {
       console.log("Dashboard not built yet. Run: pnpm build:dashboard");
     }
   });
+
+  // As PID 1 in a container Node ignores SIGTERM unless told otherwise, which made every
+  // rollout wait out Kubernetes' 30 s grace period before the old pod was killed.
+  let stopping = false;
+  const stop = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`${signal} received, shutting down`);
+    const force = setTimeout(() => process.exit(0), 5_000);
+    force.unref();
+    server.close(() => {
+      db.destroy().catch(() => {}).finally(() => process.exit(0));
+    });
+  };
+  process.once("SIGTERM", () => stop("SIGTERM"));
+  process.once("SIGINT", () => stop("SIGINT"));
 }
 
 /** Remote Postgres without TLS sends credentials and every ciphertext in the clear. */

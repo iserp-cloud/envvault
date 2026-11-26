@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: envvault-nodeport
+  namespace: envvault
+spec:
+  type: NodePort
+  externalTrafficPolicy: Cluster
+  selector:
+    app: envvault
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3847
+      nodePort: 30847
+      protocol: TCP

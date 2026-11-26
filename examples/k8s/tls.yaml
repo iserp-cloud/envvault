@@ -1,0 +1,31 @@
+# Self-made https certificate for the hub, issued inside the envvault namespace by cert-manager.
+# The hub serves it directly on the NodePort (https://<node-ip>:30847); nothing outside this namespace is used.
+# cert-manager writes the key and certificate to the secret `envvault-tls`, which the Deployment mounts.
+# Browsers and the CLI will see a self-made certificate: the CLI pins it on first contact, a browser asks once.
+# Read the fingerprint to compare:  kubectl -n envvault logs deploy/envvault | grep -i fingerprint
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: envvault-selfsigned
+  namespace: envvault
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: envvault-tls
+  namespace: envvault
+spec:
+  secretName: envvault-tls
+  commonName: envvault
+  duration: 87600h # 10 years
+  renewBefore: 720h
+  privateKey: { algorithm: ECDSA, size: 256 }
+  usages: [server auth, digital signature, key encipherment]
+  ipAddresses: # any node can serve the NodePort
+    - 192.0.2.11 # replace with your node IPs (or use dnsNames for a hostname)
+    - 192.0.2.12
+  issuerRef:
+    name: envvault-selfsigned
+    kind: Issuer
