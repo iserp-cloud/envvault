@@ -68,6 +68,11 @@ spec:
                   token cannot create one.'
                 minLength: 1
                 type: string
+              group:
+                description: Group is the key group the pushed keys are put in. Empty
+                  or `default` leaves them without a group.
+                maxLength: 40
+                type: string
               hub:
                 description: Hub overrides the hub address and how to trust it.
                 properties:

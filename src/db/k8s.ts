@@ -11,6 +11,9 @@ export type NewLink = {
   secretName: string;
   direction: "pull" | "push";
   adopt: boolean;
+  /** "default" = the keys with no group. */
+  group?: string;
+  kind?: "Secret" | "ConfigMap";
   createdBy: string;
 };
 
@@ -31,6 +34,8 @@ export async function insertK8sLink(db: Kysely<DbSchema>, link: NewLink): Promis
     key_count: 0,
     reported_at: "",
     adopt: link.adopt ? 1 : 0,
+    group_name: link.group || "default",
+    target_kind: link.kind ?? "Secret",
   };
   await db.insertInto("k8s_links").values(row).execute();
   return row;

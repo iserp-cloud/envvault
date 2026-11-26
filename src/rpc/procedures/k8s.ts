@@ -26,6 +26,7 @@ import {
   reportK8sLink,
   touchK8sCluster,
 } from "../../db/k8s.js";
+import { DEFAULT_GROUP, validateGroupName } from "@envvault/shared";
 import { AuthedContext, aclSatisfies, authed, dbOf, requireActiveMember, requireEnvironmentAccess, requireHuman } from "../base.js";
 
 /**
@@ -56,6 +57,8 @@ function linkView(l: Awaited<ReturnType<typeof getK8sLink>> & {}) {
     secretName: l.secret_name,
     direction: l.direction,
     adopt: l.adopt === 1,
+    group: l.group_name,
+    kind: l.target_kind,
     createdBy: l.created_by,
     createdAt: l.created_at,
     status: l.status,
@@ -101,6 +104,14 @@ function onePushMessage(l: { namespace: string; secret_name: string }): string {
   return `This environment already receives from ${l.namespace}/${l.secret_name}. Only one Secret can push into an environment, because two would overwrite each other's keys. Unlink that one first.`;
 }
 
+/** "default" or a valid group name, as the link stores it. */
+const GroupField = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .default(DEFAULT_GROUP)
+  .refine((g) => g === DEFAULT_GROUP || validateGroupName(g) === null, "Not a valid group name (1–40 characters: lower-case letters, digits or -)");
+
 export const k8sLinksCreate = authed
   .input(
     Location.extend({
@@ -108,6 +119,10 @@ export const k8sLinksCreate = authed
       namespace: z.string().trim().regex(NAMESPACE, "Not a valid namespace name"),
       secretName: z.string().trim().regex(SECRET_NAME, "Not a valid Secret name"),
       direction: z.enum(["pull", "push"]),
+      /** Which key group the link carries; "default" is every key that has none. */
+      group: GroupField,
+      /** What a pull writes. A push reads a Secret only. */
+      kind: z.enum(["Secret", "ConfigMap"]).default("Secret"),
       /** Take over a Secret that already exists in the cluster instead of refusing it. Pull links only. */
       adopt: z.boolean().default(false),
     }),
@@ -116,6 +131,10 @@ export const k8sLinksCreate = authed
     const db = dbOf(context);
     const actor = await requireSharer(context, input.tenantId, input.project, input.name);
     await requireClusterAccount(db, input.tenantId, input.cluster);
+
+    if (input.direction === "push" && input.kind !== "Secret") {
+      throw new ORPCError("BAD_REQUEST", { message: "Only a Secret can push into an environment" });
+    }
 
     // Two Secrets pushing into one environment overwrite each other's keys whenever a key is in both,
     // taking turns on every check. So an environment takes pushes from one Secret only; pulls are unlimited.
@@ -155,6 +174,8 @@ export const k8sLinksCreate = authed
         secretName: input.secretName,
         direction: input.direction,
         adopt: input.adopt && input.direction === "pull",
+        group: input.group,
+        kind: input.kind,
         createdBy: actor,
       });
       await fitClusterAccess(db, input.tenantId, input.project, input.name, input.cluster, false);
@@ -163,7 +184,7 @@ export const k8sLinksCreate = authed
         action: "k8s.link",
         tenantId: input.tenantId,
         target: `${input.project}/${input.name}`,
-        detail: `${input.direction} ${input.namespace}/${input.secretName}${row.adopt ? " (takes over an existing Secret)" : ""}`,
+        detail: `${input.direction} ${input.kind} ${input.namespace}/${input.secretName}${input.group !== DEFAULT_GROUP ? ` group ${input.group}` : ""}${row.adopt ? " (takes over an existing one)" : ""}`,
       });
       return linkView(row);
     } catch (err) {
@@ -171,7 +192,7 @@ export const k8sLinksCreate = authed
         // Two simultaneous pushes into one environment: the database let only one through.
         const pusher = input.direction === "push" ? await existingPush(db, input.tenantId, input.project, input.name) : undefined;
         if (pusher) throw new ORPCError("CONFLICT", { message: onePushMessage(pusher) });
-        throw new ORPCError("CONFLICT", { message: "That Secret is already linked to an environment" });
+        throw new ORPCError("CONFLICT", { message: `That ${input.kind} is already linked to an environment` });
       }
       throw err;
     }
@@ -186,7 +207,7 @@ export const k8sLinksAdopt = authed
     if (!link) throw new ORPCError("NOT_FOUND", { message: "Link not found" });
     const actor = await requireSharer(context, input.tenantId, link.project_name, link.env_name);
     if (link.direction !== "pull") {
-      throw new ORPCError("BAD_REQUEST", { message: "Only a link that writes a Secret can take one over" });
+      throw new ORPCError("BAD_REQUEST", { message: "Only a link that writes a Secret or ConfigMap can take one over" });
     }
     await setK8sLinkAdopt(db, input.tenantId, input.id, input.adopt);
     await recordAudit(context, {
@@ -368,6 +389,8 @@ export const k8sAgentSync = authed
       secretName: l.secret_name,
       direction: l.direction,
       adopt: l.adopt === 1,
+      group: l.group_name,
+      kind: l.target_kind,
     }));
   });
 

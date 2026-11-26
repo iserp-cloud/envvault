@@ -263,23 +263,35 @@ func (c *Client) Find(ctx context.Context, tok *Token, project, env string) (*En
 // Open downloads and decrypts the environment `row` describes. The location is checked against
 // what the hub echoes and the AAD is built from what was asked for, so a hub cannot hand over
 // another environment's payload.
-func (c *Client) Open(ctx context.Context, tok *Token, project string, row *EnvRow) (map[string]string, error) {
+func (c *Client) OpenData(ctx context.Context, tok *Token, project string, row *EnvRow) (Env, error) {
 	dek, err := UnwrapDEK(row.WrappedEnvDek, tok.K)
 	if err != nil {
-		return nil, &DecryptError{err}
+		return Env{}, &DecryptError{err}
 	}
 	got, err := c.GetEnv(ctx, tok.W, project, row.Name)
 	if err != nil {
-		return nil, err
+		return Env{}, err
 	}
 	if got.TenantID != tok.W || got.ProjectName != project || got.Name != row.Name {
-		return nil, &DecryptError{errors.New("the hub returned a different location than requested")}
+		return Env{}, &DecryptError{errors.New("the hub returned a different location than requested")}
 	}
-	values, err := OpenEnv(got.Payload, dek, EnvAAD(tok.W, project, row.Name))
+	env, err := OpenEnvData(got.Payload, dek, EnvAAD(tok.W, project, row.Name))
 	if err != nil {
-		return nil, &DecryptError{err}
+		return Env{}, &DecryptError{err}
 	}
-	return values, nil
+	return env, nil
+}
+
+// Open is OpenData for callers that only handle plain environments; one with key groups is refused.
+func (c *Client) Open(ctx context.Context, tok *Token, project string, row *EnvRow) (map[string]string, error) {
+	env, err := c.OpenData(ctx, tok, project, row)
+	if err != nil {
+		return nil, err
+	}
+	if env.HasGroups() {
+		return nil, &DecryptError{errors.New("this environment has key groups, which this caller cannot handle")}
+	}
+	return env.Vars, nil
 }
 
 // DecryptError means the data arrived but could not be opened (wrong key, wrong location, tampering).
@@ -317,13 +329,13 @@ func Conflict(err error) bool {
 	return errors.As(err, &ae) && ae.Code == "CONFLICT"
 }
 
-// SealFor encrypts values for the environment `row` describes.
-func SealFor(tok *Token, project string, row *EnvRow, values map[string]string) (SealedBox, error) {
+// SealFor encrypts an environment (variables and key groups) for the environment `row` describes.
+func SealFor(tok *Token, project string, row *EnvRow, env Env) (SealedBox, error) {
 	dek, err := UnwrapDEK(row.WrappedEnvDek, tok.K)
 	if err != nil {
 		return SealedBox{}, &DecryptError{err}
 	}
-	return SealEnv(values, dek, EnvAAD(tok.W, project, row.Name))
+	return SealEnvData(env, dek, EnvAAD(tok.W, project, row.Name))
 }
 
 // AgentLink is one link the hub asks this cluster to carry out.
@@ -334,7 +346,11 @@ type AgentLink struct {
 	Namespace   string `json:"namespace"`
 	SecretName  string `json:"secretName"`
 	Direction   string `json:"direction"` // pull or push
-	Adopt       bool   `json:"adopt"`     // a pull may take over a Secret that already exists
+	Adopt       bool   `json:"adopt"`     // a pull may take over a Secret or ConfigMap that already exists
+	// Group is the key group the link carries; empty or "default" means the keys that have no group.
+	Group string `json:"group"`
+	// Kind is what a pull writes: "Secret" (also when empty, as an older hub says) or "ConfigMap".
+	Kind string `json:"kind"`
 }
 
 // AgentReport is what the operator tells the hub about a link: a short status, never values.

@@ -27,7 +27,7 @@ type Props = {
   canWrite: boolean;
   /** May delete saved versions (the delete permission). */
   canDelete: boolean;
-  onRestore: (env: Record<string, string>, version: number) => void;
+  onRestore: (env: Record<string, string>, grouping: { groups: Record<string, string>; labels: string[] }, version: number) => void;
   onStatus: (message: string) => void;
   onError: (message: string | null) => void;
   onAuthFailure: () => void;
@@ -96,7 +96,7 @@ export function EnvHistory({
     setOpen(id);
     if (contents[id]) return;
     try {
-      const env = await readEnvVersion(session, projectName, environmentName, id, envDek);
+      const { env } = await readEnvVersion(session, projectName, environmentName, id, envDek);
       setContents((c) => ({ ...c, [id]: env }));
     } catch (err) {
       setOpen(null);
@@ -197,10 +197,9 @@ export function EnvHistory({
                     disabled={working !== null}
                     onClick={async () => {
                       try {
-                        const env =
-                          contents[v.id] ??
-                          (await readEnvVersion(session, projectName, environmentName, v.id, envDek));
-                        onRestore(env, v.version);
+                        // groups are not cached with the preview, so always read them with the version
+                        const got = await readEnvVersion(session, projectName, environmentName, v.id, envDek);
+                        onRestore(got.env, { groups: got.groups, labels: got.labels }, v.version);
                       } catch (err) {
                         fail(err, "Couldn't open that version");
                       }

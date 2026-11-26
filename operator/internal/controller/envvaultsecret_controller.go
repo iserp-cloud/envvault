@@ -8,6 +8,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"math/rand/v2"
 	"reflect"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -58,7 +59,10 @@ const (
 	reasonConflict      = "TargetConflict"
 	reasonRejected      = "Rejected"
 	reasonRollout       = "RolloutFailed"
+	reasonGroupEmpty    = "GroupEmpty"
 )
+
+const kindConfigMap = "ConfigMap"
 
 type syncError struct {
 	reason string
@@ -89,7 +93,7 @@ type Reconciler struct {
 
 // +kubebuilder:rbac:groups=envvault.io,resources=envvaultsecrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=envvault.io,resources=envvaultsecrets/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;patch
@@ -98,6 +102,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1.EnvVaultSecret{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.Secret{}).
+		Owns(&corev1.ConfigMap{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: max(r.Concurrency, 1)}).
 		Complete(r)
 }
@@ -259,18 +264,43 @@ func (r *Reconciler) sync(ctx context.Context, cr *v1.EnvVaultSecret) (*syncResu
 	if targetName == "" {
 		targetName = cr.Name
 	}
+	if cr.Spec.Target.Kind == kindConfigMap {
+		return r.pullConfigMap(ctx, tok, hub, configMapPlan{
+			namespace: cr.Namespace, project: cr.Spec.Project, environment: cr.Spec.Environment, target: targetName,
+			group: cr.Spec.Group, restartOn: cr.Spec.RestartOn,
+			owns:  func(c *corev1.ConfigMap) bool { return metav1.IsControlledBy(c, cr) },
+			claim: func(c *corev1.ConfigMap) error { return controllerutil.SetControllerReference(cr, c, r.Scheme) },
+		})
+	}
 	return r.pull(ctx, tok, hub, pullPlan{
 		namespace: cr.Namespace, project: cr.Spec.Project, environment: cr.Spec.Environment, target: targetName,
+		group:      cr.Spec.Group,
 		secretType: corev1.SecretType(cr.Spec.Target.Type), restartOn: cr.Spec.RestartOn,
 		owns:  func(s *corev1.Secret) bool { return metav1.IsControlledBy(s, cr) },
 		claim: func(s *corev1.Secret) error { return controllerutil.SetControllerReference(cr, s, r.Scheme) },
 	})
 }
 
+// selectGroup picks the keys one link carries. A named group with no keys is reported rather than
+// written as an empty object: it is almost always a misspelt name, and an empty target would break the
+// pods that read it. The default group may be empty (an environment with no keys yet).
+func selectGroup(env vault.Env, group string) (map[string]string, *syncError) {
+	g := vault.NormalizeGroup(group)
+	if g != "" && !vault.ValidGroup(g) {
+		return nil, fail(reasonMisconfigured, "%q is not a valid group name (1-40 characters: lower-case letters, digits or -)", group)
+	}
+	values := env.Group(g)
+	if g != "" && len(values) == 0 {
+		return nil, fail(reasonGroupEmpty, "group %q has no keys in this environment; check the name, or put keys in it in the dashboard", g)
+	}
+	return values, nil
+}
+
 // pullPlan is what one pull needs, whether it comes from an EnvVaultSecret or from a hub link: the
 // two differ only in how a Secret is recognised as theirs.
 type pullPlan struct {
 	namespace, project, environment, target string
+	group                                   string // key group to write; "" or "default" = keys that have none
 	secretType                              corev1.SecretType
 	restartOn                               []v1.WorkloadRef
 	adopt                                   bool                       // the hub link says it may take over an existing Secret
@@ -304,7 +334,7 @@ func (r *Reconciler) pull(ctx context.Context, tok *vault.Token, hub *vault.Clie
 	taking := false
 	if found && !plan.owns(&existing) {
 		if !canTakeOver(&existing, plan.adopt) {
-			return nil, fail(reasonConflict, "%s", conflictMessage(plan.namespace, targetName, &existing))
+			return nil, fail(reasonConflict, "%s", conflictMessage("Secret", plan.namespace, targetName, &existing))
 		}
 		taking = true
 	}
@@ -318,13 +348,17 @@ func (r *Reconciler) pull(ctx context.Context, tok *vault.Token, hub *vault.Clie
 		if found && existing.Type != secretType {
 			return nil, fail(reasonConflict, "Secret %q has type %q and a Secret's type cannot change; delete it so it can be recreated", targetName, existing.Type)
 		}
-		values, err := hub.Open(ctx, tok, plan.project, row)
+		env, err := hub.OpenData(ctx, tok, plan.project, row)
 		if err != nil {
 			var de *vault.DecryptError
 			if errors.As(err, &de) {
 				return nil, fail(reasonDecrypt, "%v", err)
 			}
 			return nil, hubFailure(err)
+		}
+		values, serr := selectGroup(env, plan.group)
+		if serr != nil {
+			return nil, serr
 		}
 		if bad := invalidKeys(values); len(bad) > 0 {
 			return nil, fail(reasonInvalidKeys, "these keys are not valid in a Kubernetes Secret: %v", bad)
@@ -375,7 +409,7 @@ func (r *Reconciler) pull(ctx context.Context, tok *vault.Token, hub *vault.Clie
 				return res, nil // ours; the next interval verifies it
 			}
 			if !canTakeOver(&live, plan.adopt) {
-				return nil, fail(reasonConflict, "%s", conflictMessage(plan.namespace, targetName, &live))
+				return nil, fail(reasonConflict, "%s", conflictMessage("Secret", plan.namespace, targetName, &live))
 			}
 			if live.Type != secretType {
 				return nil, fail(reasonConflict, "Secret %q has type %q and a Secret's type cannot change; delete it so it can be recreated", targetName, live.Type)
@@ -386,7 +420,7 @@ func (r *Reconciler) pull(ctx context.Context, tok *vault.Token, hub *vault.Clie
 			err = r.Update(ctx, desired)
 		}
 		if err != nil {
-			return nil, writeFailure(plan.namespace, targetName, err)
+			return nil, writeFailure("Secret", plan.namespace, targetName, err)
 		}
 		res.keys, res.wrote = len(data), true
 	}
@@ -441,34 +475,34 @@ func (r *Reconciler) rollWorkloads(ctx context.Context, namespace string, restar
 	return nil
 }
 
-// writeFailure says why the cluster would not take the Secret, so a Secret that is too large or a
+// writeFailure says why the cluster would not take the object, so one that is too large or a
 // namespace that does not exist is not mistaken for a name clash.
-func writeFailure(namespace, name string, err error) *syncError {
+func writeFailure(kind, namespace, name string, err error) *syncError {
 	switch {
 	case apierrors.IsNotFound(err):
 		return fail(reasonMisconfigured, "namespace %q does not exist; create it, or link a namespace that does", namespace)
 	case apierrors.IsInvalid(err), apierrors.IsRequestEntityTooLargeError(err):
-		return fail(reasonRejected, "the cluster refused Secret %q: %v", name, err)
+		return fail(reasonRejected, "the cluster refused %s %q: %v", kind, name, err)
 	case apierrors.IsForbidden(err):
-		return fail(reasonRejected, "the operator is not allowed to write Secret %q in %q: %v", name, namespace, err)
+		return fail(reasonRejected, "the operator is not allowed to write %s %q in %q: %v", kind, name, namespace, err)
 	}
-	return fail(reasonRejected, "cannot write Secret %q: %v", name, err)
+	return fail(reasonRejected, "cannot write %s %q: %v", kind, name, err)
 }
 
-// canTakeOver says whether a Secret this plan did not write may be taken over: only a plain one, and
-// only when its owner invited it (the annotation) or the hub link asked for it. A Secret that another
-// link, a custom resource or a push source owns is never taken.
-func canTakeOver(s *corev1.Secret, hubSaysSo bool) bool {
-	if s.Labels[LinkLabel] != "" || metav1.GetControllerOf(s) != nil || s.Labels[ManagedByLabel] == PushSourceValue {
+// canTakeOver says whether a Secret or ConfigMap this plan did not write may be taken over: only a plain
+// one, and only when its owner invited it (the annotation) or the hub link asked for it. One that
+// another link, a custom resource or a push source owns is never taken.
+func canTakeOver(o client.Object, hubSaysSo bool) bool {
+	if o.GetLabels()[LinkLabel] != "" || metav1.GetControllerOf(o) != nil || o.GetLabels()[ManagedByLabel] == PushSourceValue {
 		return false
 	}
-	return hubSaysSo || s.Annotations[AdoptAnnotation] == "true"
+	return hubSaysSo || o.GetAnnotations()[AdoptAnnotation] == "true"
 }
 
 // conflictMessage tells a person what is in the way and how to resolve it.
-func conflictMessage(namespace, name string, s *corev1.Secret) string {
-	if s.Labels[LinkLabel] != "" || metav1.GetControllerOf(s) != nil || s.Labels[ManagedByLabel] == PushSourceValue {
-		return fmt.Sprintf("Secret %q already belongs to something else; refusing to overwrite it. Pick another name, or remove what owns it", name)
+func conflictMessage(kind, namespace, name string, o client.Object) string {
+	if o.GetLabels()[LinkLabel] != "" || metav1.GetControllerOf(o) != nil || o.GetLabels()[ManagedByLabel] == PushSourceValue {
+		return fmt.Sprintf("%s %q already belongs to something else; refusing to overwrite it. Pick another name, or remove what owns it", kind, name)
 	}
-	return fmt.Sprintf("Secret %q already exists and was not written by this resource; refusing to overwrite it. To let it take over, run: kubectl -n %s annotate secret %s %s=true", name, namespace, name, AdoptAnnotation)
+	return fmt.Sprintf("%s %q already exists and was not written by this resource; refusing to overwrite it. To let it take over, run: kubectl -n %s annotate %s %s %s=true", kind, name, namespace, strings.ToLower(kind), name, AdoptAnnotation)
 }

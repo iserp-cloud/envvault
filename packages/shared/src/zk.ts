@@ -11,6 +11,7 @@
  */
 
 import { argon2id } from "hash-wasm";
+import { DEFAULT_GROUP, MAX_LABELS_PER_ENV, cleanLabels, pruneGroups, validateGroupName } from "./groups.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -231,14 +232,71 @@ export function privateKeyAad(username: string): string {
   return `envvault:privkey:v1|${normalizeLoginName(username)}`;
 }
 
+/**
+ * What an environment holds: its variables, the group of each key that is not in the default group, and
+ * `labels`, the registry of group names offered when a key is given a group (it may list names no key uses yet).
+ */
+export type EnvData = { vars: Record<string, string>; groups: Record<string, string>; labels: string[] };
+
+/** An environment with nothing but its variables. */
+export const noGroups = (): Pick<EnvData, "groups" | "labels"> => ({ groups: {}, labels: [] });
+
+/** Seals an environment. With no grouped key and no registered label the plaintext is the plain object older
+ * clients expect; otherwise it is `{"v":2,"vars":{…},"groups":{…},"labels":[…]}` (`labels` only when there are
+ * some), which an older client refuses instead of misreading. */
+export async function sealEnvData(data: EnvData, dek: string, aad: string): Promise<SealedBox> {
+  const vars: Record<string, string> = {};
+  for (const k of Object.keys(data.vars).sort()) vars[k] = data.vars[k]!;
+  const groups = pruneGroups(vars, data.groups);
+  const labels = cleanLabels(data.labels ?? []);
+  const grouped = Object.keys(groups).length > 0 || labels.length > 0;
+  const plain = !grouped ? vars : labels.length ? { v: 2, vars, groups, labels } : { v: 2, vars, groups };
+  return seal(JSON.stringify(plain), await importDek(dek), aad);
+}
+
+function stringMap(value: unknown, what: string): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Corrupt environment payload: ${what}`);
+  for (const v of Object.values(value)) {
+    if (typeof v !== "string") throw new Error(`Corrupt environment payload: ${what} has a value that is not text`);
+  }
+  return value as Record<string, string>;
+}
+
+export async function openEnvData(box: SealedBox, dek: string, aad: string): Promise<EnvData> {
+  const parsed: unknown = JSON.parse(await open(box, await importDek(dek), aad));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Corrupt environment payload");
+  }
+  const obj = parsed as Record<string, unknown>;
+  // A plain environment holds only text, so a numeric `v` can only be the grouped shape.
+  if (typeof obj.v === "number") {
+    if (obj.v !== 2) throw new Error("This environment was saved by a newer EnvVault; update this client");
+    const vars = stringMap(obj.vars, "vars");
+    const groups = stringMap(obj.groups ?? {}, "groups");
+    for (const [k, g] of Object.entries(groups)) {
+      if (!Object.prototype.hasOwnProperty.call(vars, k) || validateGroupName(g) !== null || g === DEFAULT_GROUP) {
+        throw new Error("Corrupt environment payload: groups");
+      }
+    }
+    const rawLabels = obj.labels ?? [];
+    if (!Array.isArray(rawLabels) || rawLabels.length > MAX_LABELS_PER_ENV) throw new Error("Corrupt environment payload: labels");
+    for (const l of rawLabels) {
+      if (typeof l !== "string" || l === DEFAULT_GROUP || validateGroupName(l) !== null) throw new Error("Corrupt environment payload: labels");
+    }
+    const labels = cleanLabels(rawLabels as string[]);
+    if (labels.length !== rawLabels.length) throw new Error("Corrupt environment payload: labels");
+    return { vars, groups, labels };
+  }
+  return { vars: stringMap(obj, "values"), groups: {}, labels: [] };
+}
+
+/** For callers that only handle plain environments. It refuses a grouped one rather than drop the groups on the next save. */
 export async function sealEnv(
   env: Record<string, string>,
   dek: string,
   aad: string,
 ): Promise<SealedBox> {
-  const sorted: Record<string, string> = {};
-  for (const k of Object.keys(env).sort()) sorted[k] = env[k]!;
-  return seal(JSON.stringify(sorted), await importDek(dek), aad);
+  return sealEnvData({ vars: env, ...noGroups() }, dek, aad);
 }
 
 export async function openEnv(
@@ -246,11 +304,11 @@ export async function openEnv(
   dek: string,
   aad: string,
 ): Promise<Record<string, string>> {
-  const parsed: unknown = JSON.parse(await open(box, await importDek(dek), aad));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Corrupt environment payload");
+  const data = await openEnvData(box, dek, aad);
+  if (Object.keys(data.groups).length > 0 || data.labels.length > 0) {
+    throw new Error("This environment has key groups, which this client cannot edit safely; update it");
   }
-  return parsed as Record<string, string>;
+  return data.vars;
 }
 
 // ── identity keypair (RSA-OAEP) ────────────────────────────────────────────

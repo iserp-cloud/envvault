@@ -1,5 +1,6 @@
 export * from "./zk.js";
 export * from "./env-file.js";
+export * from "./groups.js";
 export * from "./naming.js";
 export * from "./validation.js";
 export * from "./access.js";

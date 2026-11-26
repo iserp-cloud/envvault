@@ -15,9 +15,11 @@ rules:
   - apiGroups: [envvault.io]
     resources: [envvaultsecrets/status, envvaultpushes/status]
     verbs: [get, update, patch]
-  # Reads the token and CA Secrets you point at, and writes the Secrets it manages.
+  # Reads the token and CA Secrets you point at, and writes the Secrets and ConfigMaps it manages. The
+  # ConfigMap rule also covers reading the optional envvault-system/envvault-config settings. Drop
+  # configmaps if you never write a ConfigMap target; the settings ConfigMap then needs its own get rule.
   - apiGroups: [""]
-    resources: [secrets]
+    resources: [secrets, configmaps]
     verbs: [get, list, watch, create, update, patch]
   # Only used with links from the dashboard: lists namespaces so the dashboard can offer them.
   - apiGroups: [""]
@@ -57,26 +59,5 @@ metadata:
   name: envvault-operator-leader
   namespace: envvault-system
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: envvault-operator-leader }
-subjects:
-  - { kind: ServiceAccount, name: envvault-operator, namespace: envvault-system }
----
-# Reads the optional ConfigMap that limits the namespaces dashboard links may use. Only this one object.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: envvault-operator-config
-  namespace: envvault-system
-rules:
-  - apiGroups: [""]
-    resources: [configmaps]
-    resourceNames: [envvault-config]
-    verbs: [get]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: envvault-operator-config
-  namespace: envvault-system
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: envvault-operator-config }
 subjects:
   - { kind: ServiceAccount, name: envvault-operator, namespace: envvault-system }

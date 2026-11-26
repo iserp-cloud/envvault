@@ -76,9 +76,10 @@ func main() {
 	utilruntime.Must(v1.AddToScheme(scheme))
 
 	cacheOpts := cache.Options{
-		// Only Secrets this operator wrote, and push sources it labelled, are cached; token and CA Secrets are read on demand.
+		// Only the Secrets and ConfigMaps this operator wrote, and push sources it labelled, are cached; token and CA Secrets and the settings ConfigMap are read on demand.
 		ByObject: map[client.Object]cache.ByObject{
-			&corev1.Secret{}: {Label: controller.SecretSelector()},
+			&corev1.Secret{}:    {Label: controller.SecretSelector()},
+			&corev1.ConfigMap{}: {Label: controller.ConfigMapSelector()},
 		},
 	}
 	if namespace != "" {

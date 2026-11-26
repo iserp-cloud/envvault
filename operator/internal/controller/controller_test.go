@@ -41,6 +41,9 @@ type vectors struct {
 		Payload       vault.SealedBox   `json:"payload"`
 		Expected      map[string]string `json:"expected"`
 	} `json:"environment"`
+	Grouped struct {
+		Payload vault.SealedBox `json:"payload"`
+	} `json:"groupedEnvironment"`
 }
 
 type hub struct {
@@ -93,7 +96,10 @@ type env struct {
 	key types.NamespacedName
 }
 
-func setup(t *testing.T, restart ...v1.WorkloadRef) *env {
+func setup(t *testing.T, restart ...v1.WorkloadRef) *env { return setupWith(t, nil, restart...) }
+
+// setupWith is setup with a chance to change the resource before it is created.
+func setupWith(t *testing.T, edit func(*v1.EnvVaultSecretSpec, *vectors), restart ...v1.WorkloadRef) *env {
 	t.Helper()
 	b, err := os.ReadFile("../../testdata/zk-6.json")
 	if err != nil {
@@ -102,6 +108,10 @@ func setup(t *testing.T, restart ...v1.WorkloadRef) *env {
 	var v vectors
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
+	}
+	spec := v1.EnvVaultSecretSpec{}
+	if edit != nil {
+		edit(&spec, &v)
 	}
 	h := newHub(t, v)
 
@@ -117,6 +127,8 @@ func setup(t *testing.T, restart ...v1.WorkloadRef) *env {
 			Environment:    v.Environment.Name,
 			Hub:            v1.HubSpec{URL: h.srv.URL, InsecureSkipVerify: true},
 			RestartOn:      restart,
+			Group:          spec.Group,
+			Target:         spec.Target,
 		},
 	}
 	tokenSecret := &corev1.Secret{

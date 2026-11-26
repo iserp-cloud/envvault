@@ -142,6 +142,19 @@ func (h *writableHub) stored(t *testing.T) map[string]string {
 	return out
 }
 
+// storedEnv is stored with the groups.
+func (h *writableHub) storedEnv(t *testing.T) vault.Env {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e := h.v.Environment
+	out, err := vault.OpenEnvData(h.payload, h.dek, vault.EnvAAD(e.TenantID, e.Project, e.Name))
+	if err != nil {
+		t.Fatalf("the hub now holds something that cannot be opened: %v", err)
+	}
+	return out
+}
+
 func setupPush(t *testing.T, source map[string][]byte) (*PushReconciler, *writableHub, func(*testing.T) *v1.EnvVaultPush, func(map[string][]byte)) {
 	t.Helper()
 	b, err := os.ReadFile("../../testdata/zk-6.json")

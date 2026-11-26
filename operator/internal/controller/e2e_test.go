@@ -215,7 +215,7 @@ func TestE2EPushWatch(t *testing.T) {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  sch,
 		Metrics: metricsserver.Options{BindAddress: "0"},
-		Cache:   cache.Options{ByObject: map[client.Object]cache.ByObject{&corev1.Secret{}: {Label: SecretSelector()}}},
+		Cache:   cache.Options{ByObject: map[client.Object]cache.ByObject{&corev1.Secret{}: {Label: SecretSelector()}, &corev1.ConfigMap{}: {Label: ConfigMapSelector()}}},
 	})
 	if err != nil {
 		t.Fatal(err)

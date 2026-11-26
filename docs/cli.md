@@ -238,6 +238,8 @@ envvault pull -p my-app -e staging -f .env.staging
 envvault pull my-app --merge          # keep local-only lines
 envvault push -p my-app -e default -f .env
 envvault set API_KEY=secret DB_HOST=localhost
+envvault set DATABASE_URL=… --group db   # put keys in a key group (a Kubernetes link takes one group)
+envvault set LOG_LEVEL=info --group default   # back to no group
 envvault unset OLD_KEY
 envvault get API_KEY                  # one value
 envvault get                          # everything, as dotenv text
@@ -248,6 +250,7 @@ envvault get                          # everything, as dotenv text
 | `-p, --project` | config, then saved default | Project |
 | `-e, --env` | config, then `default` | Environment |
 | `-t, --tenant`, `-w, --workspace` | config, then active workspace | Workspace slug or id (it must exist) |
+| `--group` (`set` only) | unchanged | Key group for the keys being set. `push`, `set`, `unset`, restore and re-key keep the groups of the keys that stay and the environment's list of group names (a push stops if it cannot read them, instead of saving without); `pull` and `get` print the values without them. |
 | `-f, --file` | `.env`, or the config's `file` | Local file (`pull`, `push`) |
 | `--merge` | | (`pull`) merge into the existing file |
 | `--all` | | (`pull`, `push`) every target in the config |

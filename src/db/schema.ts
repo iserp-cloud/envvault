@@ -210,6 +210,10 @@ export interface K8sLinksTable {
   reported_at: string;
   /** 1 = a pull may take over a Secret that already exists in the cluster (0 = it refuses to touch one it did not write). */
   adopt: number;
+  /** Which of the environment's key groups this link carries: "default" is every key that has no group. */
+  group_name: string;
+  /** What the link writes (pull) or reads (push): a Secret, or a ConfigMap (pull only). */
+  target_kind: "Secret" | "ConfigMap";
 }
 
 /** A cluster's operator, as last seen. */

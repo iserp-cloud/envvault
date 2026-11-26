@@ -30,6 +30,24 @@ import (
 // recognises its own Secret (a link has no custom resource to own it).
 const LinkLabel = "envvault.io/hub-link"
 
+// kindOfLink is what a link writes: a ConfigMap when the hub says so, a Secret otherwise (also for a hub that predates kinds).
+func kindOfLink(k vault.AgentLink) string {
+	if k.Kind == kindConfigMap {
+		return kindConfigMap
+	}
+	return "Secret"
+}
+
+func targetKey(kind, namespace, name string) string { return kind + "/" + namespace + "/" + name }
+
+// targetOf returns an empty object of the kind a link writes, for reading it back.
+func targetOf(k vault.AgentLink) client.Object {
+	if kindOfLink(k) == kindConfigMap {
+		return &corev1.ConfigMap{}
+	}
+	return &corev1.Secret{}
+}
+
 // resendEvery is how often every link's status is sent again even if it has not changed.
 const resendEvery = 5 * time.Minute
 
@@ -61,7 +79,7 @@ type LinkReconciler struct {
 	tok      *vault.Token
 	hub      *vault.Client
 	links    map[string]vault.AgentLink
-	byTarget map[string]string // namespace/name -> link id
+	byTarget map[string]string // kind/namespace/name -> link id
 	push     map[string]*pushState
 	failures map[string]int
 	reports  map[string]vault.AgentReport // latest per link
@@ -187,7 +205,7 @@ func (l *LinkReconciler) linksFor(_ context.Context, obj client.Object) []reconc
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if id, ok := l.byTarget[obj.GetNamespace()+"/"+obj.GetName()]; ok && l.links[id].Direction == "push" {
+	if id, ok := l.byTarget[targetKey("Secret", obj.GetNamespace(), obj.GetName())]; ok && l.links[id].Direction == "push" {
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: id}}}
 	}
 	return nil
@@ -317,7 +335,7 @@ func (l *LinkReconciler) poll(ctx context.Context) error {
 	l.links = next
 	l.byTarget = make(map[string]string, len(next))
 	for id, k := range next {
-		l.byTarget[k.Namespace+"/"+k.SecretName] = id
+		l.byTarget[targetKey(kindOfLink(k), k.Namespace, k.SecretName)] = id
 	}
 	var pending []vault.AgentReport
 	for id, r := range l.reports {
@@ -363,16 +381,16 @@ func (l *LinkReconciler) enqueue(ctx context.Context, id string) bool {
 	}
 }
 
-// releaseStale frees a Secret that is still labelled for a link which no longer exists. That
+// releaseStale frees a Secret or ConfigMap that is still labelled for a link which no longer exists. That
 // happens when a link was removed while this operator was not running its link controller (an
 // older image, a restart), so nothing released it. The label then names no owner; the Secret is an
 // ordinary one again, and the take-over rule decides whether this link may have it.
 func (l *LinkReconciler) releaseStale(ctx context.Context, k vault.AgentLink) {
-	var s corev1.Secret
-	if err := l.R.APIReader.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: k.SecretName}, &s); err != nil {
+	o := targetOf(k)
+	if err := l.R.APIReader.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: k.SecretName}, o); err != nil {
 		return
 	}
-	owner := s.Labels[LinkLabel]
+	owner := o.GetLabels()[LinkLabel]
 	if owner == "" || owner == k.ID {
 		return
 	}
@@ -382,16 +400,18 @@ func (l *LinkReconciler) releaseStale(ctx context.Context, k vault.AgentLink) {
 	if live {
 		return
 	}
-	orig := s.DeepCopy()
-	delete(s.Labels, LinkLabel)
-	if s.Labels[ManagedByLabel] == ManagedByValue {
-		delete(s.Labels, ManagedByLabel)
+	orig := o.DeepCopyObject().(client.Object)
+	lbls := o.GetLabels()
+	delete(lbls, LinkLabel)
+	if lbls[ManagedByLabel] == ManagedByValue {
+		delete(lbls, ManagedByLabel)
 	}
-	if err := l.R.Patch(ctx, &s, client.MergeFrom(orig)); err != nil && !apierrors.IsNotFound(err) {
-		logf.FromContext(ctx).Info("could not release a Secret of a link that no longer exists", "secret", k.Namespace+"/"+k.SecretName, "error", err.Error())
+	o.SetLabels(lbls)
+	if err := l.R.Patch(ctx, o, client.MergeFrom(orig)); err != nil && !apierrors.IsNotFound(err) {
+		logf.FromContext(ctx).Info("could not release an object of a link that no longer exists", "target", kindOfLink(k)+" "+k.Namespace+"/"+k.SecretName, "error", err.Error())
 		return
 	}
-	logf.FromContext(ctx).Info("the link that owned this Secret no longer exists; it counts as released", "secret", k.Namespace+"/"+k.SecretName, "was", owner)
+	logf.FromContext(ctx).Info("the link that owned this object no longer exists; it counts as released", "target", kindOfLink(k)+" "+k.Namespace+"/"+k.SecretName, "was", owner)
 }
 
 // releaseSource takes the push-source mark off the Secret of a push link that was removed. Left
@@ -422,8 +442,8 @@ func (l *LinkReconciler) releaseSource(ctx context.Context, k vault.AgentLink) {
 	logf.FromContext(ctx).Info("push link removed; the Secret is left in place and no longer watched", "secret", k.Namespace+"/"+k.SecretName)
 }
 
-// release lets go of the Secret of a link that was removed in the dashboard. The Secret and its
-// values stay (pods may depend on them) but stop being kept in step: it becomes an ordinary Secret.
+// release lets go of the Secret or ConfigMap of a link that was removed in the dashboard. It and its
+// values stay (pods may depend on them) but stop being kept in step: it becomes an ordinary one.
 func (l *LinkReconciler) release(ctx context.Context, k vault.AgentLink) {
 	if !l.allowed(k.Namespace) {
 		return
@@ -435,21 +455,23 @@ func (l *LinkReconciler) release(ctx context.Context, k vault.AgentLink) {
 	if k.Direction != "pull" {
 		return
 	}
-	var s corev1.Secret
-	if err := l.R.APIReader.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: k.SecretName}, &s); err != nil {
+	o := targetOf(k)
+	if err := l.R.APIReader.Get(ctx, types.NamespacedName{Namespace: k.Namespace, Name: k.SecretName}, o); err != nil {
 		return
 	}
-	if s.Labels[LinkLabel] != k.ID {
+	if o.GetLabels()[LinkLabel] != k.ID {
 		return
 	}
-	orig := s.DeepCopy()
-	delete(s.Labels, LinkLabel)
-	delete(s.Labels, ManagedByLabel)
-	if err := l.R.Patch(ctx, &s, client.MergeFrom(orig)); err != nil && !apierrors.IsNotFound(err) {
-		logf.FromContext(ctx).Info("could not release a Secret of a removed link", "secret", k.Namespace+"/"+k.SecretName, "error", err.Error())
+	orig := o.DeepCopyObject().(client.Object)
+	lbls := o.GetLabels()
+	delete(lbls, LinkLabel)
+	delete(lbls, ManagedByLabel)
+	o.SetLabels(lbls)
+	if err := l.R.Patch(ctx, o, client.MergeFrom(orig)); err != nil && !apierrors.IsNotFound(err) {
+		logf.FromContext(ctx).Info("could not release the object of a removed link", "target", kindOfLink(k)+" "+k.Namespace+"/"+k.SecretName, "error", err.Error())
 		return
 	}
-	logf.FromContext(ctx).Info("link removed; the Secret is left in place and no longer updated", "secret", k.Namespace+"/"+k.SecretName)
+	logf.FromContext(ctx).Info("link removed; the object is left in place and no longer updated", "target", kindOfLink(k)+" "+k.Namespace+"/"+k.SecretName)
 }
 
 func (l *LinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -480,6 +502,7 @@ func (l *LinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		var res *pushResult
 		res, serr = l.P.pushPlanned(ctx, tok, hub, pushPlan{
 			namespace: k.Namespace, project: k.Project, environment: k.Environment, source: k.SecretName,
+			group:    k.Group,
 			note:     fmt.Sprintf("Pushed by envvault-operator (link %s/%s)", k.Namespace, k.SecretName),
 			observed: st.observed, digest: st.digest,
 		})
@@ -489,15 +512,27 @@ func (l *LinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	default:
 		l.releaseStale(ctx, k)
 		var res *syncResult
-		res, serr = l.R.pull(ctx, tok, hub, pullPlan{
-			namespace: k.Namespace, project: k.Project, environment: k.Environment, target: k.SecretName,
-			adopt: k.Adopt,
-			owns:  func(s *corev1.Secret) bool { return s.Labels[LinkLabel] == id },
-			claim: func(s *corev1.Secret) error {
-				s.Labels[LinkLabel] = id
-				return nil
-			},
-		})
+		if kindOfLink(k) == kindConfigMap {
+			res, serr = l.R.pullConfigMap(ctx, tok, hub, configMapPlan{
+				namespace: k.Namespace, project: k.Project, environment: k.Environment, target: k.SecretName,
+				group: k.Group, adopt: k.Adopt,
+				owns: func(c *corev1.ConfigMap) bool { return c.Labels[LinkLabel] == id },
+				claim: func(c *corev1.ConfigMap) error {
+					c.Labels[LinkLabel] = id
+					return nil
+				},
+			})
+		} else {
+			res, serr = l.R.pull(ctx, tok, hub, pullPlan{
+				namespace: k.Namespace, project: k.Project, environment: k.Environment, target: k.SecretName,
+				group: k.Group, adopt: k.Adopt,
+				owns: func(s *corev1.Secret) bool { return s.Labels[LinkLabel] == id },
+				claim: func(s *corev1.Secret) error {
+					s.Labels[LinkLabel] = id
+					return nil
+				},
+			})
+		}
 		if serr == nil {
 			keys, wrote = res.keys, res.wrote
 		}
@@ -511,7 +546,7 @@ func (l *LinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		failures++
 		report.Status, report.Message, report.KeyCount = serr.reason, truncate(serr.err.Error(), 280), 0
 		reconcileTotal.WithLabelValues("link", serr.reason).Inc()
-		logf.FromContext(ctx).Info("link failed", "link", k.Namespace+"/"+k.SecretName, "reason", serr.reason, "error", serr.err.Error())
+		logf.FromContext(ctx).Info("link failed", "link", k.Namespace+"/"+k.SecretName, "kind", kindOfLink(k), "group", k.Group, "reason", serr.reason, "error", serr.err.Error())
 	} else {
 		failures = 0
 		reconcileTotal.WithLabelValues("link", "ok").Inc()
