@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Boxes,
   ChevronsUpDown,
   Copy,
   ShieldCheck,
@@ -48,6 +49,8 @@ import { Fingerprint } from "@/components/Fingerprint";
 import { RecoveryKeyPanel } from "@/components/RecoveryKeyPanel";
 import { Logo } from "@/components/Logo";
 import { EnvHistory } from "@/components/EnvHistory";
+import { EnvironmentCombobox } from "@/components/EnvironmentCombobox";
+import { KubernetesLinks } from "@/components/KubernetesLinks";
 import { InvitesBanner } from "@/components/InvitesBanner";
 import { PasswordDialog } from "@/components/PasswordDialog";
 import { RecoveryKeyDialog } from "@/components/RecoveryKeyDialog";
@@ -96,7 +99,7 @@ import {
 import { useConfirm } from "@/components/ConfirmDialog";
 
 type AppPage = "projects" | "settings" | "admin";
-type ProjectPane = "env" | "settings" | "history";
+type ProjectPane = "env" | "settings" | "history" | "kubernetes";
 
 type Props = {
   session: Session;
@@ -991,6 +994,17 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                         <History />
                       </Button>
                     )}
+                    {selectedEnv && envDek && canShareEnv && (
+                      <Button
+                        variant={projectPane === "kubernetes" ? "secondary" : "outline"}
+                        size="icon"
+                        className="size-8"
+                        tooltip={projectPane === "kubernetes" ? "Back to environment" : "Kubernetes"}
+                        onClick={() => setProjectPane((p) => (p === "kubernetes" ? "env" : "kubernetes"))}
+                      >
+                        <Boxes />
+                      </Button>
+                    )}
                     {canManageEnv && isOrg && (
                       <Button
                         variant={projectPane === "settings" ? "secondary" : "outline"}
@@ -1041,40 +1055,25 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                   </div>
                 )}
 
-                <div className="mt-4 flex items-center gap-1 overflow-x-auto border-b px-6">
-                  {environments.map((env) => (
-                    <button
-                      key={env.name}
-                      type="button"
-                      className={cn(
-                        "-mb-px whitespace-nowrap border-b-2 px-3 py-2 text-[13px] font-medium transition-colors",
-                        selectedEnv === env.name
-                          ? "border-primary text-foreground"
-                          : "border-transparent text-muted-foreground hover:text-foreground",
-                      )}
-                      onClick={() => {
-                        setSelectedEnv(env.name);
-                        setProjectPane("env");
-                      }}
-                    >
-                      {env.name}
-                    </button>
-                  ))}
-                  {projectCanManage && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="ml-1 h-7"
-                      disabled={busy}
-                      onClick={() => {
-                        setNewEnvName("");
-                        setEnvDialogOpen(true);
-                      }}
-                    >
-                      <Plus className="size-3.5" />
-                      New env
-                    </Button>
-                  )}
+                <div className="mt-4 flex items-center gap-3 border-b px-6 pb-3">
+                  <span className="text-[13px] font-medium text-muted-foreground">Environment</span>
+                  <EnvironmentCombobox
+                    environments={environments}
+                    value={selectedEnv}
+                    disabled={busy}
+                    onChange={(name) => {
+                      setSelectedEnv(name);
+                      setProjectPane("env");
+                    }}
+                    onCreate={
+                      projectCanManage
+                        ? (suggested) => {
+                            setNewEnvName(suggested);
+                            setEnvDialogOpen(true);
+                          }
+                        : undefined
+                    }
+                  />
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-6">
@@ -1091,6 +1090,17 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                       onRestore={onRestoreVersion}
                       onStatus={setStatus}
                       onError={setError}
+                      onAuthFailure={onAuthFailure}
+                    />
+                  ) : projectPane === "kubernetes" && canShareEnv && envDek && selectedEnv ? (
+                    <KubernetesLinks
+                      session={session}
+                      projectName={selected}
+                      environmentName={selectedEnv}
+                      envDek={envDek}
+                      keyVersion={environments.find((e) => e.name === selectedEnv)?.keyVersion ?? 0}
+                      canShare={canShareEnv}
+                      onStatus={setStatus}
                       onAuthFailure={onAuthFailure}
                     />
                   ) : projectPane === "settings" && canManageEnv && isOrg && envDek && selectedEnv ? (

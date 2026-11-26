@@ -21,6 +21,18 @@ import {
   serviceAccountsRevoke,
 } from "./procedures/service.js";
 import {
+  k8sAgentReport,
+  k8sAgentSync,
+  k8sClustersExtend,
+  k8sClustersLinks,
+  k8sClustersList,
+  k8sClustersReplace,
+  k8sLinksAdopt,
+  k8sLinksCreate,
+  k8sLinksDelete,
+  k8sLinksList,
+} from "./procedures/k8s.js";
+import {
   adminInvitesCreate,
   adminInvitesList,
   adminInvitesRevoke,
@@ -106,6 +118,11 @@ export const appRouter = {
     delete: tenantsDelete,
     keyRecipients: tenantsKeyRecipients,
     audit: tenantsAudit,
+  },
+  k8s: {
+    links: { create: k8sLinksCreate, list: k8sLinksList, delete: k8sLinksDelete, adopt: k8sLinksAdopt },
+    clusters: { list: k8sClustersList, extend: k8sClustersExtend, links: k8sClustersLinks, replace: k8sClustersReplace },
+    agent: { sync: k8sAgentSync, report: k8sAgentReport },
   },
   serviceAccounts: {
     create: serviceAccountsCreate,

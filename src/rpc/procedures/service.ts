@@ -1,6 +1,7 @@
 import { ORPCError } from "@orpc/server";
 import { z } from "zod";
 import { recordAudit } from "../../audit.js";
+import { deleteK8sLinksForCluster } from "../../db/k8s.js";
 import {
   latestSessionExpiry,
   listServiceAccounts,
@@ -101,6 +102,7 @@ export const serviceAccountsRevoke = authed
         input.tenantId,
         input.username.trim().toLowerCase(),
       );
+      await deleteK8sLinksForCluster(dbOf(context), input.tenantId, input.username.trim().toLowerCase());
       await recordAudit(context, {
         actor,
         action: "service.revoke",

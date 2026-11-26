@@ -1,3 +1,4 @@
+import { deleteK8sLinksForProject } from "../../db/k8s.js";
 import { ORPCError } from "@orpc/server";
 import { recordAudit } from "../../audit.js";
 import { z } from "zod";
@@ -148,6 +149,7 @@ export const deleteProjectProc = authed
     if (!(await removeStoredProject(db, input.name, input.tenantId))) {
       throw new ORPCError("NOT_FOUND", { message: "Project not found" });
     }
+    await deleteK8sLinksForProject(db, input.tenantId, input.name);
     await recordAudit(context, { actor: username, action: "project.delete", tenantId: input.tenantId, target: input.name });
     return { ok: true as const };
   });

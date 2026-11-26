@@ -228,6 +228,29 @@ type DashboardClient = {
       wrappedPrivateKey: SealedBox;
     }) => Promise<{ ok: true }>;
   };
+  k8s: {
+    clusters: {
+      list: (input: { tenantId: string }) => Promise<K8sCluster[]>;
+      extend: (input: { tenantId: string; cluster: string; expiresInDays?: number }) => Promise<{ expiresAt: string }>;
+      links: (input: { tenantId: string; cluster: string }) => Promise<K8sLink[]>;
+      replace: (input: { tenantId: string; from: string; to: string }) => Promise<{ moved: number }>;
+    };
+    links: {
+      list: (input: { tenantId: string; project: string; name: string }) => Promise<K8sLink[]>;
+      create: (input: {
+        tenantId: string;
+        project: string;
+        name: string;
+        cluster: string;
+        namespace: string;
+        secretName: string;
+        direction: "pull" | "push";
+        adopt?: boolean;
+      }) => Promise<K8sLink>;
+      adopt: (input: { tenantId: string; id: string; adopt: boolean }) => Promise<K8sLink>;
+      delete: (input: { tenantId: string; id: string }) => Promise<{ ok: true; revoked: boolean }>;
+    };
+  };
   serviceAccounts: {
     create: (input: {
       tenantId: string;
@@ -387,13 +410,68 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
 export type StoredSession = Omit<Session, "privateKey">;
 
 const SESSION_KEY = "envvault.session";
+const UNLOCK_KEY = "envvault.unlocked";
+
+/**
+ * How long after the last activity a page refresh keeps the vault unlocked. While the window is
+ * open the decrypted private key sits in this tab's sessionStorage (gone when the tab closes), so
+ * script running on this page, or someone at the open browser, could read it. 0 turns it off: the
+ * key then lives in memory only and every refresh asks for the password. Locking, signing out, the
+ * idle lock and an expired session all wipe it at once.
+ */
+export const REFRESH_GRACE_MINUTES = 10;
 
 export function saveSession(session: Session): void {
-  const { privateKey: _privateKey, ...stored } = session;
+  const { privateKey, ...stored } = session;
   try {
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(stored satisfies StoredSession));
+    if (REFRESH_GRACE_MINUTES > 0) sessionStorage.setItem(UNLOCK_KEY, JSON.stringify({ privateKey, at: Date.now() }));
   } catch {
     /* storage unavailable: the user just signs in again after a refresh */
+  }
+}
+
+/** Wipe the kept key (lock, sign-out, expiry). */
+export function forgetUnlock(): void {
+  try {
+    sessionStorage.removeItem(UNLOCK_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+let lastTouch = 0;
+/** Note user activity so the grace window counts from the last input. Cheap: at most one write every 15 s. */
+export function touchUnlock(): void {
+  const now = Date.now();
+  if (now - lastTouch < 15_000) return;
+  lastTouch = now;
+  try {
+    const raw = sessionStorage.getItem(UNLOCK_KEY);
+    if (!raw) return;
+    const k = JSON.parse(raw) as { privateKey?: string; at?: number };
+    if (typeof k.privateKey === "string") sessionStorage.setItem(UNLOCK_KEY, JSON.stringify({ privateKey: k.privateKey, at: now }));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** After a refresh: the unlocked session again if it is still inside the grace window and the key still matches. */
+export async function restoreUnlocked(stored: StoredSession): Promise<Session | null> {
+  if (REFRESH_GRACE_MINUTES <= 0) return null;
+  try {
+    const raw = sessionStorage.getItem(UNLOCK_KEY);
+    if (!raw) return null;
+    const k = JSON.parse(raw) as { privateKey?: string; at?: number };
+    const fresh = typeof k.at === "number" && Date.now() - k.at < REFRESH_GRACE_MINUTES * 60_000;
+    if (!fresh || typeof k.privateKey !== "string" || (await derivePublicKey(k.privateKey)) !== stored.publicKey) {
+      forgetUnlock();
+      return null;
+    }
+    return { ...stored, privateKey: k.privateKey };
+  } catch {
+    forgetUnlock();
+    return null;
   }
 }
 
@@ -421,6 +499,7 @@ export function loadStoredSession(): StoredSession | null {
 export function clearSession(): void {
   try {
     sessionStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(UNLOCK_KEY);
     // Older versions kept these.
     localStorage.removeItem("envvault.token");
     localStorage.removeItem("envvault.syncToken");
@@ -1185,3 +1264,141 @@ export async function rotateEnvironmentNow(
     return { droppedVersions };
   });
 }
+
+// ── kubernetes links ───────────────────────────────────────────────────────
+
+export type K8sCluster = {
+  cluster: string;
+  status: string;
+  /** When the operator last asked the hub for its links; null until it first does. */
+  lastSeen: string | null;
+  version: string;
+  namespaces: string[];
+  /** When the token stops working, from the hub's own record; null once it has expired. */
+  expiresAt: string | null;
+  tokenExpiresAt: string | null;
+};
+
+export type K8sLink = {
+  id: string;
+  project: string;
+  environment: string;
+  cluster: string;
+  namespace: string;
+  secretName: string;
+  direction: "pull" | "push";
+  /** A pull link that may take over a Secret already in the cluster instead of refusing it. */
+  adopt: boolean;
+  /** What the operator last reported (Synced, Pushed, or a reason it failed); empty until it has. */
+  status: string;
+  message: string;
+  keyCount: number;
+  reportedAt: string;
+};
+
+/** A cluster is a service token named k8s-…; its token goes into the cluster once, for the operator. */
+export async function connectCluster(
+  s: Session,
+  name: string,
+): Promise<{ token: string; username: string; expiresAt: string }> {
+  return createServiceToken(s, { name: `k8s-${name}`, expiresInDays: 365, grants: [] });
+}
+
+/** More time for a token that still works. Same token and key, so nothing changes in the cluster. */
+export const extendCluster = (s: Session, cluster: string) =>
+  call(() => createClient(s).k8s.clusters.extend({ tenantId: s.activeTenantId, cluster, expiresInDays: 365 }));
+
+/**
+ * For a token that has expired (its key cannot be recovered): make a new one, give it the same
+ * environments, hand the links over and retire the old one. The new token is shown once, to be
+ * put into the cluster in place of the old.
+ */
+export async function replaceCluster(
+  s: Session,
+  oldCluster: string,
+): Promise<{ token: string; username: string; expiresAt: string; moved: number }> {
+  return call(async () => {
+    const api = createClient(s);
+    const tenantId = s.activeTenantId;
+    const links = await api.k8s.clusters.links({ tenantId, cluster: oldCluster });
+    const grants = new Map<string, { project: string; env: string; level: Level }>();
+    for (const l of links) {
+      const key = `${l.project}/${l.environment}`;
+      const level: Level = l.direction === "push" || grants.get(key)?.level === "write" ? "write" : "read";
+      grants.set(key, { project: l.project, env: l.environment, level });
+    }
+    // main -> main-r2 -> main-r3: the count says how many tokens this cluster has been through.
+    const [, base, gen] = /^(.*?)(?:-r(\d+))?$/.exec(oldCluster.replace(/^svc-k8s-/, ""))!;
+    const fresh = await createServiceToken(s, {
+      name: `k8s-${base.slice(0, 18)}-r${Number(gen ?? 1) + 1}`,
+      expiresInDays: 365,
+      grants: [...grants.values()],
+    });
+    try {
+      const { moved } = await api.k8s.clusters.replace({ tenantId, from: oldCluster, to: fresh.username });
+      await revokeServiceToken(s, oldCluster);
+      return { ...fresh, moved };
+    } catch (err) {
+      await api.serviceAccounts.revoke({ tenantId, username: fresh.username }).catch(() => undefined);
+      throw err;
+    }
+  });
+}
+
+export const listClusters = (s: Session) =>
+  call(() => createClient(s).k8s.clusters.list({ tenantId: s.activeTenantId }));
+
+export const listK8sLinks = (s: Session, project: string, env: string) =>
+  call(() => createClient(s).k8s.links.list({ tenantId: s.activeTenantId, project, name: env }));
+
+/**
+ * Link an environment to a Secret. Granting the cluster token the environment's key has to happen
+ * here, in the browser, because only a person who holds the key can wrap it; the hub cannot.
+ */
+export async function linkEnvironment(
+  s: Session,
+  input: {
+    project: string;
+    env: string;
+    envDek: string;
+    keyVersion: number;
+    cluster: string;
+    namespace: string;
+    secretName: string;
+    direction: "pull" | "push";
+    /** Take over a Secret that already exists in the cluster (pull only). */
+    adopt?: boolean;
+  },
+): Promise<void> {
+  await call(async () => {
+    const api = createClient(s);
+    const grantee = await prepareGrant(s, input.cluster);
+    await api.environments.grantAccess({
+      tenantId: s.activeTenantId,
+      project: input.project,
+      name: input.env,
+      username: input.cluster,
+      level: input.direction === "push" ? "write" : "read",
+      caps: [],
+      wrappedEnvDek: await wrapSecretForPublicKey(input.envDek, grantee.publicKey),
+      keyVersion: input.keyVersion,
+    });
+    savePin(grantee.username, grantee.fingerprint);
+    await api.k8s.links.create({
+      tenantId: s.activeTenantId,
+      project: input.project,
+      name: input.env,
+      cluster: input.cluster,
+      namespace: input.namespace,
+      secretName: input.secretName,
+      direction: input.direction,
+      adopt: input.adopt === true,
+    });
+  });
+}
+
+export const setLinkAdopt = (s: Session, id: string, adopt: boolean) =>
+  call(() => createClient(s).k8s.links.adopt({ tenantId: s.activeTenantId, id, adopt }));
+
+export const unlinkEnvironment = (s: Session, id: string) =>
+  call(() => createClient(s).k8s.links.delete({ tenantId: s.activeTenantId, id }));

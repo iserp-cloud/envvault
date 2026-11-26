@@ -15,6 +15,7 @@ Encryption happens in the **browser and CLI** (AES-256-GCM, RSA-OAEP keypairs, A
 | [Deploy](docs/deploy.md) | Docker, Compose, running it on an orchestrator, hardening settings |
 | [Architecture](docs/architecture.md) | Tenants, environments, crypto, RPC |
 | [Cloudflare](docs/cloudflare.md) | Worker + Postgres deploy |
+| [Kubernetes operator](operator/README.md) | Sync environments to Kubernetes Secrets (and back), from the dashboard or with resources |
 
 ## Quick start
 

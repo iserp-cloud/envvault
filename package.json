@@ -20,6 +20,7 @@
     "migrate": "tsx src/index.ts migrate",
     "publish:cli": "pnpm build:cli && pnpm --filter @iserp/envvault publish --access public --no-git-checks",
     "test": "tsx --test test/*.test.ts",
+    "vectors": "tsx scripts/gen-vectors.ts",
     "build:hub": "pnpm build:shared && tsup --config tsup.hub.config.ts"
   },
   "engines": {

@@ -1,3 +1,4 @@
+import { deleteK8sLinksForEnv } from "../../db/k8s.js";
 import { ORPCError } from "@orpc/server";
 import { recordAudit } from "../../audit.js";
 import { z } from "zod";
@@ -189,6 +190,7 @@ export const environmentsDelete = authed
         message: "Cannot delete the last environment in a project",
       });
     }
+    await deleteK8sLinksForEnv(db, input.tenantId, input.project, envName);
     await recordAudit(context, { actor: username, action: "env.delete", tenantId: input.tenantId, target: `${input.project}/${envName}` });
     return { ok: true as const };
   });

@@ -3,7 +3,7 @@ import { ORPCError } from "@orpc/server";
 import { z } from "zod";
 import { AUTH_KEY_RE } from "../../auth-proof.js";
 import { recordAudit } from "../../audit.js";
-import { getUser } from "../../db/store.js";
+import { getUser, latestSessionExpiry } from "../../db/store.js";
 import {
   AccountDisabledError,
   changePassword,
@@ -152,6 +152,9 @@ export const login = base
     try {
       const result = await loginUser(db, input, reqMeta(context));
       await clearFailures(db, `acct:${userKey}`);
+      // Only guesses count against the per-address limit: unlocking the dashboard is a sign-in too,
+      // and a correct password must not use up the attempts a wrong one would.
+      await clearFailures(db, `login:${ip}:${userKey}`);
       await recordAudit(context, { actor: result.username, action: "account.login" });
       return sessionFields(result);
     } catch (err) {
@@ -279,7 +282,9 @@ export const recoverProc = base
 
 export const me = authed.handler(async ({ context }) => {
   const { username, role, kind } = (context as AuthedContext).auth;
-  return { username, role, kind };
+  // A service token can learn when it stops working, so whatever runs it can warn ahead of time.
+  const expiresAt = kind === "service" ? await latestSessionExpiry(dbOf(context), username) : undefined;
+  return { username, role, kind, ...(expiresAt ? { expiresAt } : {}) };
 });
 
 // ── sessions (signed-in devices) ───────────────────────────────────────────

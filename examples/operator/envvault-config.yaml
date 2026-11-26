@@ -1,0 +1,31 @@
+# Optional settings for dashboard links. Copy this file, fill in what you need, and apply it:
+#
+#   kubectl apply -f envvault-config.yaml
+#
+# The operator re-reads it about every 30 seconds, so editing it later
+# (kubectl -n envvault-system edit configmap envvault-config) needs no redeploy and no restart.
+# Every key is optional; delete the ones you don't need. Without this ConfigMap the operator uses
+# the address in the cluster token and lets links write to any namespace.
+#
+# Keep this file out of install.yaml: applying install.yaml again would overwrite your values.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envvault-config
+  namespace: envvault-system
+data:
+  # Where dashboard links may write Secrets: a comma separated list, or "*" for every namespace.
+  # Leave the key out for every namespace; an empty value ("") means none.
+  namespaces: "prod,staging"
+
+  # The hub's address, when the one in the cluster token can't be reached from this cluster
+  # (for example the in-cluster Service of a hub running here). https unless the operator runs
+  # with --hub-allow-plain-http.
+  hubUrl: "https://envvault.envvault.svc:443"
+
+  # SHA-256 fingerprint of the hub's certificate, for a hub with its own (self-signed) certificate.
+  # Not needed when the certificate is signed by a CA the cluster trusts. Update it here when the
+  # certificate is renewed. Get it with:
+  #   kubectl -n <hub namespace> get secret <hub tls secret> -o jsonpath='{.data.tls\.crt}' \
+  #     | base64 -d | openssl x509 -noout -fingerprint -sha256
+  hubFingerprint: "AB:CD:EF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC"

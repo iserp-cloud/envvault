@@ -96,6 +96,17 @@ export async function deleteSessionsForUser(
   await db.deleteFrom("sessions").where("username", "=", username).execute();
 }
 
+/** Pushes the expiry of a user's live sessions out; returns how many there were (0: already expired and gone). */
+export async function extendSessions(db: Kysely<DbSchema>, username: string, expiresAt: string): Promise<number> {
+  const res = await db
+    .updateTable("sessions")
+    .set({ expires_at: expiresAt })
+    .where("username", "=", username)
+    .where("expires_at", ">", new Date().toISOString())
+    .executeTakeFirst();
+  return Number(res.numUpdatedRows);
+}
+
 /** Drop expired sessions. Cheap; call opportunistically. */
 export async function purgeExpiredSessions(db: Kysely<DbSchema>): Promise<void> {
   await db.deleteFrom("sessions").where("expires_at", "<", new Date().toISOString()).execute();

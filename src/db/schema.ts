@@ -13,6 +13,8 @@ export interface Database {
   environment_versions: EnvironmentVersionsTable;
   environment_keys: EnvironmentKeysTable;
   environment_acl: EnvironmentAclTable;
+  k8s_links: K8sLinksTable;
+  k8s_clusters: K8sClustersTable;
 }
 
 export interface SettingsTable {
@@ -183,3 +185,45 @@ export type ProjectRow = ProjectsTable;
 export type EnvironmentRow = EnvironmentsTable;
 export type EnvironmentKeyRow = EnvironmentKeysTable;
 export type EnvironmentAclRow = EnvironmentAclTable;
+
+/**
+ * An environment linked to a Kubernetes Secret. Metadata only: the values never pass through here,
+ * the operator in the cluster decrypts them with the cluster token's own key.
+ */
+export interface K8sLinksTable {
+  id: string;
+  tenant_id: string;
+  project_name: string;
+  env_name: string;
+  /** The service account (cluster token) that carries this link out. */
+  cluster: string;
+  namespace: string;
+  secret_name: string;
+  /** pull = the Secret is written from the environment; push = the environment is written from the Secret. */
+  direction: "pull" | "push";
+  created_by: string;
+  created_at: string;
+  /** What the operator last reported; empty until it has. */
+  status: string;
+  status_message: string;
+  key_count: number;
+  reported_at: string;
+  /** 1 = a pull may take over a Secret that already exists in the cluster (0 = it refuses to touch one it did not write). */
+  adopt: number;
+}
+
+/** A cluster's operator, as last seen. */
+export interface K8sClustersTable {
+  /** The cluster token's username. */
+  cluster: string;
+  tenant_id: string;
+  last_seen: string;
+  version: string;
+  /** JSON array of the namespaces the operator may use. */
+  namespaces: string;
+  /** When the cluster token stops working, as the operator says; empty when unknown. */
+  token_expires_at: string;
+}
+
+export type K8sLinkRow = K8sLinksTable;
+export type K8sClusterRow = K8sClustersTable;

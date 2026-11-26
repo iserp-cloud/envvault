@@ -1,7 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import {
   clearAllCredentials,
+  forgetUnlock,
   loadStoredSession,
+  restoreUnlocked,
+  touchUnlock,
   saveSession,
   revokeRemoteSession,
   type Session,
@@ -23,8 +26,13 @@ export default function App() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    setStored(loadStoredSession());
-    setReady(true);
+    const kept = loadStoredSession();
+    // A refresh shortly after the last activity keeps the vault unlocked; otherwise the password is asked for.
+    void (kept ? restoreUnlocked(kept) : Promise.resolve(null)).then((unlocked) => {
+      if (unlocked) setSession(unlocked);
+      else setStored(kept);
+      setReady(true);
+    });
   }, []);
 
   function onUnlocked(next: Session) {
@@ -35,6 +43,7 @@ export default function App() {
 
   // Drop the decrypted key from memory but keep the session: unlocking needs only the password.
   const lock = useCallback(() => {
+    forgetUnlock();
     if (session) {
       const { privateKey: _privateKey, ...rest } = session;
       setStored(rest);
@@ -65,6 +74,16 @@ export default function App() {
 
   // Lock (and wipe in-memory keys) after 15 minutes without input.
   useIdleLock(session ? lock : null, 15);
+
+  // Activity keeps the refresh grace window open.
+  useEffect(() => {
+    if (!session) return;
+    const events = ["mousemove", "mousedown", "keydown", "touchstart", "scroll"] as const;
+    for (const e of events) window.addEventListener(e, touchUnlock, { passive: true });
+    return () => {
+      for (const e of events) window.removeEventListener(e, touchUnlock);
+    };
+  }, [session]);
 
   if (!ready) {
     return (

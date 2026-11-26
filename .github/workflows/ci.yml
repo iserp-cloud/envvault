@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:shared
+      - run: npx tsc --noEmit
+      - run: pnpm test
+        env:
+          DATABASE_URL: "" # never a real database
+
+  operator:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: operator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: Generated files are up to date
+        run: |
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
+          make manifests
+          git diff --exit-code -- . || { echo "run 'make manifests' in operator/ and commit the result"; exit 1; }
+      - name: Image builds
+        run: docker build --platform linux/amd64 -t envvault-operator:ci .

@@ -101,3 +101,15 @@ envvault-tls/
 # A file or folder whose name ends in ":" is a database URL that was used as a path by mistake
 # (it can contain a password). The hub now refuses such URLs; this is the second line of defence.
 *:
+
+# Registry credentials for pulling the operator image: never committed.
+operator/config/*pull-secret*.yaml
+
+# Your filled-in copies of the example manifests (examples/k8s, examples/operator). The *.example.yaml files ship.
+examples/k8s/secret.yaml
+examples/k8s/docker-pull-secret.yaml
+operator/config/config-map.yaml
+operator/config/install.local.yaml
+
+# The rule `secrets.*` above is for credential files; this is operator source code.
+!/operator/internal/controller/secrets.go

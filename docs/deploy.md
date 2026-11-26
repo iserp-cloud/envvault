@@ -35,6 +35,10 @@ No manifests ship with the project: they depend on your cluster, registry, ingre
 
 A `DATABASE_URL` that looks like a URL but doesn't start with `postgres://` or `postgresql://` (a typo such as `postgressql://`) is refused at startup. It is never treated as a file path, which would put the connection string, password included, into a file name.
 
+Example Kubernetes manifests for the hub (Deployment, Service, cert-manager certificate, NodePort, secrets) are in [`examples/k8s`](../examples/k8s). They hold placeholders only: copy them to a git-ignored folder such as `deploy/k8s/` and fill them in.
+
+To sync environments into Kubernetes Secrets (and back), install the operator in `operator/`; see [`operator/README.md`](../operator/README.md) and its [`RUNBOOK.md`](../operator/RUNBOOK.md). The hub needs no extra settings for it: the operator's tables are created on startup, and the operator reaches the hub with a cluster token made in the dashboard.
+
 ## Configuration
 
 | Variable | Recommended | Why |
