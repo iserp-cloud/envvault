@@ -28,12 +28,19 @@ async function ensureK8sTables(db: Kysely<DbSchema>): Promise<void> {
       status_message TEXT NOT NULL DEFAULT '',
       key_count INTEGER NOT NULL DEFAULT 0,
       reported_at TEXT NOT NULL DEFAULT '',
-      adopt INTEGER NOT NULL DEFAULT 0
+      adopt INTEGER NOT NULL DEFAULT 0,
+      group_name TEXT NOT NULL DEFAULT 'default',
+      target_kind TEXT NOT NULL DEFAULT 'Secret'
     )
   `.execute(db);
-  // One writer per Secret: a Secret is the target of one link, which also stops a pull and a push from looping.
   await addColumn(db, "k8s_links", "adopt", "INTEGER NOT NULL DEFAULT 0");
-  await sql`CREATE UNIQUE INDEX IF NOT EXISTS k8s_links_secret_idx ON k8s_links (cluster, namespace, secret_name)`.execute(db);
+  // Key groups: a link carries one group, and every link made before groups carries the default one.
+  await addColumn(db, "k8s_links", "group_name", "TEXT NOT NULL DEFAULT 'default'");
+  await addColumn(db, "k8s_links", "target_kind", "TEXT NOT NULL DEFAULT 'Secret'");
+  // One writer per target: a Secret or a ConfigMap is the target of one link, which also stops a pull and a
+  // push from looping. A Secret and a ConfigMap may share a name, so the kind is part of the key.
+  await sql`DROP INDEX IF EXISTS k8s_links_secret_idx`.execute(db);
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS k8s_links_target_idx ON k8s_links (cluster, namespace, target_kind, secret_name)`.execute(db);
   await sql`CREATE INDEX IF NOT EXISTS k8s_links_env_idx ON k8s_links (tenant_id, project_name, env_name)`.execute(db);
   await ensureOnePushPerEnvironment(db);
   await sql`

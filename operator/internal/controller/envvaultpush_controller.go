@@ -148,6 +148,7 @@ func (p *PushReconciler) push(ctx context.Context, cr *v1.EnvVaultPush) (*pushRe
 
 	return p.pushPlanned(ctx, tok, hub, pushPlan{
 		namespace: cr.Namespace, project: cr.Spec.Project, environment: cr.Spec.Environment, source: cr.Spec.SourceSecretName,
+		group:    cr.Spec.Group,
 		note:     fmt.Sprintf("Pushed by envvault-operator (%s/%s)", cr.Namespace, cr.Name),
 		observed: cr.Status.ObservedVersion, digest: cr.Status.SourceDigest,
 	})
@@ -156,6 +157,7 @@ func (p *PushReconciler) push(ctx context.Context, cr *v1.EnvVaultPush) (*pushRe
 // pushPlan is what one push needs, whether it comes from an EnvVaultPush or from a hub link.
 type pushPlan struct {
 	namespace, project, environment, source string
+	group                                   string // key group the pushed keys are put in; "" = none
 	note                                    string // the label on the saved version
 	observed, digest                        string // what the last successful push saw, to skip unchanged work
 }
@@ -235,7 +237,11 @@ func (p *PushReconciler) pushOnce(ctx context.Context, plan pushPlan, tok *vault
 		return nil // nothing changed on either side since the last check
 	}
 
-	current, err := hub.Open(ctx, tok, plan.project, row)
+	group := vault.NormalizeGroup(plan.group)
+	if group != "" && !vault.ValidGroup(group) {
+		return fail(reasonMisconfigured, "%q is not a valid group name (1-40 characters: lower-case letters, digits or -)", plan.group)
+	}
+	current, err := hub.OpenData(ctx, tok, plan.project, row)
 	if err != nil {
 		var de *vault.DecryptError
 		if errors.As(err, &de) {
@@ -243,16 +249,30 @@ func (p *PushReconciler) pushOnce(ctx context.Context, plan pushPlan, tok *vault
 		}
 		return hubFailure(err)
 	}
-	merged := make(map[string]string, len(current)+len(want))
-	for k, v := range current {
-		merged[k] = v
+	merged := vault.Env{
+		Vars:   make(map[string]string, len(current.Vars)+len(want)),
+		Groups: make(map[string]string, len(current.Groups)+len(want)),
+		Labels: current.Labels, // the dashboard's registry of group names is not the operator's to change
+	}
+	for k, v := range current.Vars {
+		merged.Vars[k] = v
+	}
+	for k, g := range current.Groups {
+		merged.Groups[k] = g
 	}
 	differs := false
 	for k, v := range want {
-		if old, ok := current[k]; !ok || old != v {
+		// The link decides the group of the keys it pushes: they are put in it, or taken out of any group
+		// when the link has none. Keys the Secret does not have keep theirs.
+		if old, ok := current.Vars[k]; !ok || old != v || current.GroupOf(k) != orDefault(group) {
 			differs = true
 		}
-		merged[k] = v
+		merged.Vars[k] = v
+		if group == "" {
+			delete(merged.Groups, k)
+		} else {
+			merged.Groups[k] = group
+		}
 	}
 	if !differs {
 		return nil
@@ -271,4 +291,12 @@ func (p *PushReconciler) pushOnce(ctx context.Context, plan pushPlan, tok *vault
 	}
 	res.version, res.wrote = fmt.Sprintf("%s#%d", updatedAt, row.KeyVersion), true
 	return nil
+}
+
+// orDefault is the group name as a key reports it: "default" for none.
+func orDefault(group string) string {
+	if group == "" {
+		return vault.DefaultGroup
+	}
+	return group
 }

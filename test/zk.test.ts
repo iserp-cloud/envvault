@@ -758,6 +758,48 @@ describe("zero-knowledge hub", () => {
     assert.equal((await admin.api.k8s.links.list({ tenantId: tid, project: "p", name: "default" })).length, 1);
   });
 
+  it("links carry a key group and a target kind; both default to the default group and a Secret", async () => {
+    const org = await admin.api.tenants.create({ name: "k8s-groups" });
+    const tid = org.id;
+    const keys = await generateIdentityKeyPair();
+    const acct = await admin.api.serviceAccounts.create({ tenantId: tid, name: "k8s-grp", publicKey: keys.publicKey, expiresInDays: 30 });
+    const dek = await makeProject(admin, tid, "p", { A: "1" });
+    await grantAccess(admin.api, {
+      tenantId: tid, project: "p", name: "default", username: acct.username, level: "write",
+      wrappedEnvDek: await wrapSecretForPublicKey(dek, keys.publicKey),
+    });
+    const loc = { tenantId: tid, project: "p", name: "default" };
+    const make = (extra: Record<string, unknown>) =>
+      admin.api.k8s.links.create({ ...loc, cluster: acct.username, namespace: "ns", direction: "pull", ...extra } as any);
+
+    const plain = await make({ secretName: "app-secret" });
+    assert.deepEqual([plain.group, plain.kind], ["default", "Secret"], "a link made the old way takes the default group");
+    const db = await make({ secretName: "app-db", group: "db" });
+    assert.equal(db.group, "db");
+    // A Secret and a ConfigMap may share a name; two links to the same target may not.
+    const cm = await make({ secretName: "app-secret", kind: "ConfigMap", group: "DB" });
+    assert.deepEqual([cm.group, cm.kind], ["db", "ConfigMap"], "group names are lower-cased");
+    await assert.rejects(make({ secretName: "app-secret", kind: "ConfigMap" }), /ConfigMap is already linked/);
+    await assert.rejects(make({ secretName: "app-secret" }), /Secret is already linked/);
+
+    await assert.rejects(make({ secretName: "x", group: "Bad Name" }), /Input validation failed/);
+    await assert.rejects(make({ secretName: "x", group: "a_b" }), /Input validation failed/);
+    await assert.rejects(make({ secretName: "x", kind: "Pod" }), /Input validation failed/);
+    await assert.rejects(make({ secretName: "x", direction: "push", kind: "ConfigMap" }), /Only a Secret can push/);
+    const pushed = await make({ secretName: "src", direction: "push", group: "api" });
+    assert.deepEqual([pushed.direction, pushed.group, pushed.kind], ["push", "api", "Secret"]);
+
+    // The operator receives both, so it knows which keys go where.
+    const agent = client(acct.token);
+    const got = await agent.k8s.agent.sync({ namespaces: ["ns"] });
+    assert.deepEqual(
+      got.map((l: any) => [l.secretName, l.kind, l.group]).sort(),
+      [["app-db", "Secret", "db"], ["app-secret", "ConfigMap", "db"], ["app-secret", "Secret", "default"], ["src", "Secret", "api"]],
+    );
+    const audit = JSON.stringify(await admin.api.tenants.audit({ tenantId: tid, limit: 50 }));
+    assert.match(audit, /pull ConfigMap ns\/app-secret group db/);
+  });
+
   it("deleting a project needs owner/admin or manage on every environment", async () => {
     const alice = admin;
     const bobNow = await login("bob", "a brand new passphrase");
@@ -1073,6 +1115,36 @@ describe("schema upgrade", () => {
       await assert.rejects(ins("d", "fourth"), /UNIQUE|unique/);
     } finally {
       console.warn = realWarn;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("links made before key groups take the default group and a Secret, and a ConfigMap may share a Secret's name", async () => {
+    const { ensureSchema } = await import("../src/db/store.js");
+    const { sql } = await import("kysely");
+    const dir = mkdtempSync(join(tmpdir(), "envvault-upgrade-"));
+    try {
+      const old = await openDb(join(dir, "vault.db"));
+      // Rewind to the previous shape: no group/kind columns, and the index that ignored the kind.
+      await sql`DROP INDEX IF EXISTS k8s_links_target_idx`.execute(old);
+      await sql`ALTER TABLE k8s_links DROP COLUMN group_name`.execute(old);
+      await sql`ALTER TABLE k8s_links DROP COLUMN target_kind`.execute(old);
+      await sql`CREATE UNIQUE INDEX k8s_links_secret_idx ON k8s_links (cluster, namespace, secret_name)`.execute(old);
+      await sql`INSERT INTO k8s_links (id, tenant_id, project_name, env_name, cluster, namespace, secret_name, direction, created_by, created_at)
+                VALUES ('l', 't', 'p', 'default', 'svc-k8s-x', 'ns', 'app', 'pull', 'alice', '2020-01-01T00:00:00.000Z')`.execute(old);
+
+      await ensureSchema(old);
+
+      const row = await old.selectFrom("k8s_links").selectAll().executeTakeFirstOrThrow();
+      assert.deepEqual([row.group_name, row.target_kind], ["default", "Secret"]);
+      const ins = (id: string, kind: string) =>
+        sql`INSERT INTO k8s_links (id, tenant_id, project_name, env_name, cluster, namespace, secret_name, direction, created_by, created_at, group_name, target_kind)
+            VALUES (${id}, 't', 'p', 'default', 'svc-k8s-x', 'ns', 'app', 'pull', 'alice', '2020-01-01T00:00:00.000Z', 'default', ${kind})`.execute(old);
+      await ins("cm", "ConfigMap"); // the old index would have refused this
+      await assert.rejects(ins("again", "ConfigMap"), /UNIQUE|unique/);
+      await ensureSchema(old); // running it again changes nothing
+      assert.equal((await old.selectFrom("k8s_links").selectAll().execute()).length, 2);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

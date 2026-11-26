@@ -15,13 +15,17 @@ import {
   generateDek,
   generateIdentityKeyPair,
   keyFingerprintHex,
-  openEnv,
+  cleanLabels,
+  noGroups,
+  openEnvData,
+  pruneGroups,
+  type EnvData,
   openPrivateKey,
   openRecoveredPrivateKey,
   privateKeyAad,
   publicKeyFingerprint,
   seal,
-  sealEnv,
+  sealEnvData,
   unwrapSecretWithPrivateKey,
   wrapSecretForPublicKey,
   hasCap,
@@ -104,6 +108,10 @@ export type ProjectEnv = {
   projectName: string;
   updatedAt: string;
   env: Record<string, string>;
+  /** Group of each key that is not in the default group. */
+  groups: Record<string, string>;
+  /** The environment's registry of group names. */
+  labels: string[];
 };
 
 export type TenantInvite = {
@@ -246,6 +254,8 @@ type DashboardClient = {
         secretName: string;
         direction: "pull" | "push";
         adopt?: boolean;
+        group?: string;
+        kind?: "Secret" | "ConfigMap";
       }) => Promise<K8sLink>;
       adopt: (input: { tenantId: string; id: string; adopt: boolean }) => Promise<K8sLink>;
       delete: (input: { tenantId: string; id: string }) => Promise<{ ok: true; revoked: boolean }>;
@@ -851,7 +861,7 @@ export async function createProject(
     const dek = generateDek();
     const [keyWraps, payload] = await Promise.all([
       wrapForTenant(s, dek, tenantId),
-      sealEnv({}, dek, envAad(tenantId, name, "default")),
+      sealEnvData({ vars: {}, ...noGroups() }, dek, envAad(tenantId, name, "default")),
     ]);
     const created = await createClient(s).projects.create({ tenantId, name, payload, keyWraps });
     return {
@@ -882,7 +892,7 @@ export async function createEnvironment(s: Session, project: string, name: strin
     const dek = generateDek();
     const [keyWraps, payload] = await Promise.all([
       wrapForTenant(s, dek, tenantId),
-      sealEnv({}, dek, envAad(tenantId, project, envName)),
+      sealEnvData({ vars: {}, ...noGroups() }, dek, envAad(tenantId, project, envName)),
     ]);
     const created = await createClient(s).environments.create({
       tenantId,
@@ -922,12 +932,15 @@ export async function getEnv(
   return call(async () => {
     const tenantId = s.activeTenantId;
     const got = await createClient(s).environments.getEnv({ tenantId, project, name: envName });
+    const data = await openEnvData(got.payload, envDek, envAad(tenantId, project, envName));
     return {
       name: got.name,
       tenantId: got.tenantId,
       projectName: got.projectName,
       updatedAt: got.updatedAt,
-      env: await openEnv(got.payload, envDek, envAad(tenantId, project, envName)),
+      env: data.vars,
+      groups: data.groups,
+      labels: data.labels,
     };
   });
 }
@@ -937,13 +950,14 @@ export async function saveEnv(
   project: string,
   envName: string,
   env: Record<string, string>,
+  grouping: Pick<EnvData, "groups" | "labels">,
   envDek: string,
   baseUpdatedAt?: string | null,
   note?: string,
 ): Promise<ProjectEnv> {
   return call(async () => {
     const tenantId = s.activeTenantId;
-    const payload = await sealEnv(env, envDek, envAad(tenantId, project, envName));
+    const payload = await sealEnvData({ vars: env, ...grouping }, envDek, envAad(tenantId, project, envName));
     const saved = await createClient(s).environments.saveEnv({
       tenantId,
       project,
@@ -952,7 +966,7 @@ export async function saveEnv(
       baseUpdatedAt: baseUpdatedAt ?? undefined,
       note: note || undefined,
     });
-    return { name: envName, tenantId, projectName: project, updatedAt: saved.updatedAt, env };
+    return { name: envName, tenantId, projectName: project, updatedAt: saved.updatedAt, env, groups: pruneGroups(env, grouping.groups), labels: cleanLabels(grouping.labels) };
   });
 }
 
@@ -968,11 +982,12 @@ export async function readEnvVersion(
   envName: string,
   id: string,
   envDek: string,
-): Promise<Record<string, string>> {
+): Promise<{ env: Record<string, string>; groups: Record<string, string>; labels: string[] }> {
   return call(async () => {
     const tenantId = s.activeTenantId;
     const v = await createClient(s).environments.versions.get({ tenantId, project, name: envName, id });
-    return openEnv(v.payload, envDek, envAad(tenantId, project, envName));
+    const data = await openEnvData(v.payload, envDek, envAad(tenantId, project, envName));
+    return { env: data.vars, groups: data.groups, labels: data.labels };
   });
 }
 
@@ -1033,7 +1048,7 @@ async function rotateEnvironment(
 ): Promise<{ dek: string; droppedVersions: number }> {
   const api = createClient(s);
   const current = await api.environments.getEnv(loc);
-  const env = await openEnv(current.payload, currentDek, envAad(loc.tenantId, loc.project, loc.name));
+  const env = await openEnvData(current.payload, currentDek, envAad(loc.tenantId, loc.project, loc.name));
 
   const acl = await api.environments.listAccess(loc);
   const keep = acl.map((a) => a.username).filter((u) => !exclude.includes(u));
@@ -1057,7 +1072,7 @@ async function rotateEnvironment(
   const resealed: Array<{ id: string; version: number; payload: SealedBox }> = [];
   for (const v of exported) {
     try {
-      resealed.push({ id: v.id, version: v.version, payload: await sealEnv(await openEnv(v.payload, currentDek, aad), newDek, aad) });
+      resealed.push({ id: v.id, version: v.version, payload: await sealEnvData(await openEnvData(v.payload, currentDek, aad), newDek, aad) });
     } catch {
       /* corrupt or foreign version: it can't be carried over */
     }
@@ -1066,7 +1081,7 @@ async function rotateEnvironment(
   // history can never stop a revoking rotation from going through.
   const request = {
     ...loc,
-    payload: await sealEnv(env, newDek, aad),
+    payload: await sealEnvData(env, newDek, aad),
     keyWraps,
     baseUpdatedAt: current.updatedAt,
   };
@@ -1287,6 +1302,10 @@ export type K8sLink = {
   namespace: string;
   secretName: string;
   direction: "pull" | "push";
+  /** The key group this link carries ("default" for keys that have no group). */
+  group: string;
+  /** What it writes: a Secret, or a ConfigMap for settings that are not sensitive. */
+  kind: "Secret" | "ConfigMap";
   /** A pull link that may take over a Secret already in the cluster instead of refusing it. */
   adopt: boolean;
   /** What the operator last reported (Synced, Pushed, or a reason it failed); empty until it has. */
@@ -1368,6 +1387,8 @@ export async function linkEnvironment(
     direction: "pull" | "push";
     /** Take over a Secret that already exists in the cluster (pull only). */
     adopt?: boolean;
+    group?: string;
+    kind?: "Secret" | "ConfigMap";
   },
 ): Promise<void> {
   await call(async () => {
@@ -1393,6 +1414,8 @@ export async function linkEnvironment(
       secretName: input.secretName,
       direction: input.direction,
       adopt: input.adopt === true,
+      group: input.group || "default",
+      kind: input.kind ?? "Secret",
     });
   });
 }

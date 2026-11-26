@@ -17,6 +17,10 @@ type EnvVaultPushSpec struct {
 	// SourceSecretName is a Secret in this namespace. Each of its keys is written to the environment.
 	// +kubebuilder:validation:MinLength=1
 	SourceSecretName string `json:"sourceSecretName"`
+	// Group is the key group the pushed keys are put in. Empty or `default` leaves them without a group.
+	// +kubebuilder:validation:MaxLength=40
+	// +optional
+	Group string `json:"group,omitempty"`
 	// RefreshInterval between checks (minimum 10s, default 60s).
 	// +optional
 	RefreshInterval *metav1.Duration `json:"refreshInterval,omitempty"`

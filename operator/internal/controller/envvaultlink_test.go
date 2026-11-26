@@ -272,7 +272,7 @@ func TestWriteFailureNamesTheRealCause(t *testing.T) {
 		{apierrors.NewForbidden(gr, "s", errors.New("no")), reasonRejected},
 		{errors.New("boom"), reasonRejected},
 	} {
-		if got := writeFailure("ns", "s", tc.err).reason; got != tc.want {
+		if got := writeFailure("Secret", "ns", "s", tc.err).reason; got != tc.want {
 			t.Errorf("%v -> %s, want %s", tc.err, got, tc.want)
 		}
 	}

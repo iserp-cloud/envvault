@@ -118,7 +118,7 @@ Instead of writing a resource per Secret, install the operator once with a **clu
    kubectl -n envvault-system create secret generic envvault-cluster-token --from-literal=token=evt_…
    ```
 2. Apply `install.yaml`. The operator starts reading the token Secret as soon as it exists, so the order of steps 1 and 2 doesn't matter. Links may use any namespace unless you limit them with the ConfigMap below. It then shows as **Operator connected** with its version and the namespaces it may write to.
-3. On an environment, pick a direction, a namespace and a Secret name, and press **Link**.
+3. On an environment, pick a direction, a namespace, a name and a **key group**, choose Secret or ConfigMap, and press **Link**.
    - **Vault → Secret** creates the Secret and keeps it in step with the environment (a hub edit arrives within about a minute).
    - **Secret → Vault** pushes the keys of an existing Secret into the environment (a Secret edit arrives within about a second).
 
@@ -148,8 +148,31 @@ kubectl -n envvault-system create configmap envvault-config \
 
 If the ConfigMap cannot be read, the last values are kept; deleting it goes back to the flags and the cluster token's address. A plain `http://` address is still refused unless the operator runs with `--hub-allow-plain-http`, so the ConfigMap cannot downgrade the connection. Whoever can edit this ConfigMap can point the operator (and its token) at another hub, so give that right only to people who could already edit the operator's Deployment.
 
-- **The hub keeps only the mapping** (cluster, namespace, Secret name, direction, status). Values never leave the browser unencrypted: linking grants the cluster token read (pull) or write (push) access to that one environment, with the key wrapped for it by the person linking.
-- **One writer per Secret.** A Secret can be linked once; the operator will not overwrite a Secret it did not create (`TargetConflict`) unless it was invited to (see "Never overwrites by default" below), and will not push a Secret that a link or an `EnvVaultSecret` writes.
+### Key groups: one environment, several Secrets and ConfigMaps
+
+An app often needs a Secret and a ConfigMap, or two Secrets. Give each key a **group** in the editor (the Group column; empty means `default`) and link each group where it should go:
+
+| Key | Group |
+|---|---|
+| `DATABASE_URL`, `DB_PASSWORD` | `db` |
+| `STRIPE_KEY` | `payments` |
+| `LOG_LEVEL`, `FEATURE_X` | (default) |
+
+Link `default` as the ConfigMap `app-config` and `db` as the Secret `app-db`, and each holds only its own keys. Groups are part of the encrypted data, so the hub never sees how your keys are organised.
+
+**The Groups button** on an environment opens its list of group names. Add a name once (`db`) and it becomes a choice in every key's Group menu and in the link form, so nobody retypes it. A name can be registered before any key uses it, and a name that keys use cannot be removed until they move. The list is stored inside the encrypted environment too, and the operator leaves it untouched when it pushes.
+
+- **Every existing environment and link is in the `default` group**, so nothing changes until you use groups. A group name is 1 to 40 lowercase letters, digits or dashes, and cannot be `default`.
+- **A link carries one group and one kind** (`Secret` or `ConfigMap`). A Secret and a ConfigMap may share a name; two links to the same kind and name may not. `spec.group` and `spec.target.kind` do the same for an `EnvVaultSecret` or `EnvVaultPush`.
+- **An empty group writes nothing.** A link to a named group with no keys reports `GroupEmpty` and leaves the target alone. The `default` group may be empty.
+- **Moving a key between groups** moves it between the targets on the next sync.
+- **Push** (Secret → Vault) puts the pushed keys in the link's group and leaves every other key and group alone. Only a Secret can push.
+- **A ConfigMap is not protected like a Secret.** Anyone who can read ConfigMaps in the namespace can read it, and it is not encrypted at rest by default. The dashboard warns when a key that looks sensitive goes into one. Binary data added to a managed ConfigMap is removed on the next sync, like any other edit.
+- **Old readers refuse a grouped environment** instead of writing it wrongly: upgrade the hub, the operator and the CLI before using groups. An environment with no groups is stored exactly as before, so old clients keep working with it.
+- **Permissions.** The operator now also needs to create and update ConfigMaps (`install.yaml` is updated; `kubectl apply` it again). Drop `configmaps` from its ClusterRole if you never write a ConfigMap, and give the operator `get` on the settings ConfigMap instead.
+
+- **The hub keeps only the mapping** (cluster, namespace, name, kind, group, direction, status). Values never leave the browser unencrypted: linking grants the cluster token read (pull) or write (push) access to that one environment, with the key wrapped for it by the person linking.
+- **One writer per target.** A Secret (or a ConfigMap) can be linked once; the operator will not overwrite a Secret it did not create (`TargetConflict`) unless it was invited to (see "Never overwrites by default" below), and will not push a Secret that a link or an `EnvVaultSecret` writes.
 - **Both directions on one environment** is fine, with different Secrets (for example a pull into `app-env` that your pods read, and a push from `app-generated`). The cluster token holds `write` while any link on that environment pushes, and drops back to `read` when the last push link is removed. If a pushed key also exists in the vault, the Secret's value wins for that key.
 - **Unlink** stops updates and removes the operator's labels; the Secret and its values stay. When it is the cluster's last link on that environment, the cluster token's access to it is revoked.
 - Status (`Synced`, `Pushed`, `TargetConflict`, …) and key counts are reported back and shown in the dashboard. Namespaces outside the allow-list report `NamespaceNotAllowed`.
@@ -171,7 +194,7 @@ If the ConfigMap cannot be read, the last values are kept; deleting it goes back
 - **Deleting the resource deletes the Secret** (it is owned by it).
 - Keys must be valid Secret keys (letters, digits, `-`, `_`, `.`); otherwise nothing is written and the offending names are listed.
 
-Ready reasons: `Synced`, `Misconfigured`, `TokenInvalid`, `Unauthorized` (expired or revoked), `NoAccess` (missing or not shared; the hub doesn't say which), `HubUnreachable`, `DecryptFailed`, `InvalidKeys`, `TargetConflict`, `Rejected` (the cluster refused the Secret, e.g. over its 1 MiB limit), `RolloutFailed`.
+Ready reasons: `Synced`, `Misconfigured`, `TokenInvalid`, `Unauthorized` (expired or revoked), `NoAccess` (missing or not shared; the hub doesn't say which), `HubUnreachable`, `DecryptFailed`, `InvalidKeys`, `GroupEmpty`, `TargetConflict`, `Rejected` (the cluster refused the Secret, e.g. over its 1 MiB limit), `RolloutFailed`.
 
 ## Flags
 
@@ -201,12 +224,12 @@ These are one machine and a short run, not a soak. Your numbers depend on how fa
 
 ## Permissions and scope
 
-The default install is cluster-wide and its ClusterRole can read and write Secrets and patch Deployments, StatefulSets and DaemonSets. To narrow it:
+The default install is cluster-wide and its ClusterRole can read and write Secrets and ConfigMaps and patch Deployments, StatefulSets and DaemonSets. To narrow it:
 
 - drop the `apps` rule if you don't use `restartOn`;
 - run with `--namespace prod` and replace the ClusterRole/Binding with a Role/RoleBinding in that namespace.
 
-Only Secrets the operator wrote (label `app.kubernetes.io/managed-by=envvault-operator`) are held in its cache; token and CA Secrets are read on demand.
+Only Secrets and ConfigMaps the operator wrote (label `app.kubernetes.io/managed-by=envvault-operator`) are held in its cache; token and CA Secrets are read on demand.
 
 ## Develop
 

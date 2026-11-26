@@ -3,6 +3,7 @@ import { ArrowRight, Check, Copy, Plus, Unlink } from "lucide-react";
 import {
   connectCluster,
   extendCluster,
+  getEnv,
   linkEnvironment,
   setLinkAdopt,
   listClusters,
@@ -13,6 +14,7 @@ import {
   type K8sLink,
   type Session,
 } from "@/api";
+import { groupCounts } from "@envvault/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
@@ -105,6 +107,11 @@ export function KubernetesLinks({ session, projectName, environmentName, envDek,
   const [cluster, setCluster] = useState("");
   const [direction, setDirection] = useState<"pull" | "push">("pull");
   const [adopt, setAdopt] = useState(false);
+  const [group, setGroup] = useState("default");
+  const [kind, setKind] = useState<"Secret" | "ConfigMap">("Secret");
+  // The groups this environment has and how many keys each holds; "default" is always there.
+  const [groups, setGroups] = useState<{ group: string; keys: number }[]>([{ group: "default", keys: 0 }]);
+  const [secretLooking, setSecretLooking] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   const [namespace, setNamespace] = useState("");
   const [secretName, setSecretName] = useState(() => suggestSecretName(projectName, environmentName));
@@ -143,6 +150,30 @@ export function KubernetesLinks({ session, projectName, environmentName, envDek,
   useEffect(() => {
     if (pushLink && direction === "push") setDirection("pull");
   }, [pushLink, direction]);
+
+  // Read the environment (it is opened here, in the browser) to offer its groups and to warn about secret-looking keys.
+  useEffect(() => {
+    let live = true;
+    getEnv(session, projectName, environmentName, envDek)
+      .then((e) => {
+        if (!live) return;
+        const counts = groupCounts(e.env, e.groups);
+        // registered names with no key yet are offered too (that link says GroupEmpty until a key is added)
+        for (const name of e.labels) if (!counts.some((g) => g.group === name)) counts.push({ group: name, keys: 0 });
+        setGroups(counts.some((g) => g.group === "default") ? counts : [{ group: "default", keys: 0 }, ...counts]);
+        const inGroup = (k: string) => (e.groups[k] ?? "default") === group;
+        setSecretLooking(Object.keys(e.env).filter((k) => inGroup(k) && /PASSWORD|SECRET|TOKEN|PRIVATE|CREDENTIAL|API_?KEY|_KEY$/i.test(k)));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [session, projectName, environmentName, envDek, group, links.length]);
+
+  // A push link always writes a Secret.
+  useEffect(() => {
+    if (direction === "push" && kind !== "Secret") setKind("Secret");
+  }, [direction, kind]);
 
   const active = clusters?.find((c) => c.cluster === cluster) ?? clusters?.[0];
   useEffect(() => {
@@ -207,7 +238,7 @@ export function KubernetesLinks({ session, projectName, environmentName, envDek,
     setError(null);
     if (!active) return;
     if (!SECRET_NAME.test(secretName)) {
-      setError("That is not a valid Secret name (lowercase letters, digits, dashes and dots).");
+      setError(`That is not a valid ${kind} name (lowercase letters, digits, dashes and dots).`);
       return;
     }
     if (!namespace.trim()) {
@@ -231,10 +262,12 @@ export function KubernetesLinks({ session, projectName, environmentName, envDek,
         secretName,
         direction,
         adopt: direction === "pull" && adopt,
+        group,
+        kind,
       });
       onStatus(
         direction === "pull"
-          ? `Linked. ${namespace}/${secretName} will be created within about half a minute.`
+          ? `Linked. ${namespace}/${secretName} (${kind}) will be created within about half a minute.`
           : `Linked. Keys in ${namespace}/${secretName} will be pushed to ${environmentName}.`,
       );
       setAdding(false);
@@ -400,7 +433,7 @@ export function KubernetesLinks({ session, projectName, environmentName, envDek,
                 <p className="text-xs text-muted-foreground">
                   Optional: to limit the namespaces links may use, or to give the operator the hub&apos;s in-cluster address and certificate fingerprint, create
                   the <code className="font-mono">envvault-config</code> ConfigMap (see{" "}
-                  <code className="font-mono">operator/config/examples/envvault-config.yaml</code>
+                  <code className="font-mono">examples/operator/envvault-config.yaml</code>
                   ). Without it every namespace is allowed and the operator uses the address in the token. Changes to it apply within about 30 seconds, with no
                   restart.
                 </p>
@@ -438,8 +471,8 @@ export function KubernetesLinks({ session, projectName, environmentName, envDek,
           {(adding || links.length === 0) && (
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">{links.length > 0 ? "Add a link" : "Link to a Secret"}</CardTitle>
-                <CardDescription>Pick a direction, a namespace and a Secret name. The Secret is created for you when it comes from the hub.</CardDescription>
+                <CardTitle className="text-base">{links.length > 0 ? "Add a link" : "Link to a Secret or ConfigMap"}</CardTitle>
+                <CardDescription>Pick a direction, a namespace, a name and which key group to write, as a Secret or a ConfigMap. It is created for you when it comes from the hub.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 {links.length === 0 && clusterStatus}
@@ -471,7 +504,7 @@ export function KubernetesLinks({ session, projectName, environmentName, envDek,
                     </div>
                     <p className="text-xs text-muted-foreground">
                       {direction === "pull"
-                        ? "The operator creates the Secret and keeps it in step with this environment."
+                        ? `The operator creates the ${kind} and keeps it in step with this environment.`
                         : "The Secret wins for the keys it has: they are added here or overwritten. Keys it doesn't have are left alone; nothing is deleted."}
                       {pushLink &&
                         ` Secret → Vault is off: this environment already receives from ${pushLink.namespace}/${pushLink.secretName}, and only one Secret can push into an environment. Unlink it to use another.`}
@@ -517,17 +550,66 @@ export function KubernetesLinks({ session, projectName, environmentName, envDek,
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="k8s-secret">Secret name</Label>
+                    <Label htmlFor="k8s-secret">{kind} name</Label>
                     <Input id="k8s-secret" value={secretName} onChange={(e) => setSecretName(e.target.value)} className="font-mono text-sm" />
                   </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="k8s-group">Key group</Label>
+                    <Select value={group} onValueChange={setGroup}>
+                      <SelectTrigger id="k8s-group" className="h-9 w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {groups.map((g) => (
+                          <SelectItem key={g.group} value={g.group}>
+                            {g.group} ({g.keys} {g.keys === 1 ? "key" : "keys"})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Only the keys in this group go in. Give keys a group in the editor; keys without one are in "default".
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Write it as</Label>
+                    <div className="flex gap-2" role="radiogroup" aria-label="Kind">
+                      {(["Secret", "ConfigMap"] as const).map((k) => (
+                        <Button
+                          key={k}
+                          type="button"
+                          role="radio"
+                          aria-checked={kind === k}
+                          variant={kind === k ? "secondary" : "outline"}
+                          disabled={k === "ConfigMap" && direction === "push"}
+                          title={k === "ConfigMap" && direction === "push" ? "Only a Secret can push into the vault" : undefined}
+                          onClick={() => setKind(k)}
+                        >
+                          {k}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {kind === "ConfigMap" && secretLooking.length > 0 && (
+                    <Alert className="sm:col-span-2">
+                      <AlertDescription>
+                        A ConfigMap is not protected like a Secret: anyone who can read ConfigMaps in the namespace can read it. These keys in
+                        "{group}" look sensitive: {secretLooking.slice(0, 5).join(", ")}
+                        {secretLooking.length > 5 ? ", …" : ""}. Put them in another group and link that to a Secret.
+                      </AlertDescription>
+                    </Alert>
+                  )}
 
                   {direction === "pull" && (
                     <label className="flex cursor-pointer items-start gap-2.5 text-sm sm:col-span-2">
                       <Checkbox checked={adopt} onCheckedChange={(on) => setAdopt(on === true)} className="mt-0.5" />
                       <span>
-                        Take over this Secret if it already exists
+                        Take over this {kind} if it already exists
                         <span className="block text-xs text-muted-foreground">
-                          Off by default: the operator never overwrites a Secret it did not create. Turn it on to replace an existing Secret's contents with
+                          Off by default: the operator never overwrites a {kind} it did not create. Turn it on to replace an existing {kind}'s contents with
                           this environment's values.
                         </span>
                       </span>
@@ -576,7 +658,7 @@ function LinkList({
             <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
               {l.direction === "pull" ? (
                 <>
-                  Vault <ArrowRight className="size-3.5" /> Secret
+                  Vault <ArrowRight className="size-3.5" /> {l.kind}
                 </>
               ) : (
                 <>
@@ -587,6 +669,7 @@ function LinkList({
             <span className="font-mono text-sm font-medium">
               {l.namespace}/{l.secretName}
             </span>
+            {l.group !== "default" && <Badge variant="outline">group {l.group}</Badge>}
             {l.status === "" ? <Badge variant="outline">Waiting for the operator</Badge> : <Badge variant={ok ? "success" : "destructive"}>{l.status}</Badge>}
             {l.status !== "" && (
               <span className="text-xs text-muted-foreground">

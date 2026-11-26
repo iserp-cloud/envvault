@@ -16,6 +16,7 @@ import {
   Menu,
   Plus,
   Settings,
+  Tags,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -43,7 +44,8 @@ import {
   type TenantMember,
   type TenantMeta,
 } from "@/api";
-import { describeAccess, hasCap } from "@envvault/shared";
+import { cleanLabels, describeAccess, groupCounts, hasCap, knownGroups, validateGroupName } from "@envvault/shared";
+import { GroupRegistry } from "@/components/GroupRegistry";
 import { AdminPage } from "@/components/AdminPage";
 import { Fingerprint } from "@/components/Fingerprint";
 import { RecoveryKeyPanel } from "@/components/RecoveryKeyPanel";
@@ -89,7 +91,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { isUnauthorized } from "@/lib/auth-errors";
 import { useLivePolling } from "@/lib/live";
-import { formatDate, rowsToEnv, toRows, type EnvRow } from "@/lib/env-rows";
+import { formatDate, rowsToEnv, rowsToGroups, toRows, type EnvRow } from "@/lib/env-rows";
 import {
   detectAndParseImport,
   serializeEnvExport,
@@ -130,6 +132,10 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
   const [projectCanManage, setProjectCanManage] = useState(false);
   const [rows, setRows] = useState<EnvRow[]>([]);
   const [baseline, setBaseline] = useState("");
+  const [baselineGroups, setBaselineGroups] = useState("{}");
+  const [labels, setLabels] = useState<string[]>([]);
+  const [baselineLabels, setBaselineLabels] = useState("[]");
+  const [groupsOpen, setGroupsOpen] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -163,7 +169,19 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     }
   }, [baseline]);
 
-  const dirty = useMemo(() => JSON.stringify(rowsToEnv(rows)) !== baseline, [rows, baseline]);
+  const dirty = useMemo(
+    () =>
+      JSON.stringify(rowsToEnv(rows)) !== baseline ||
+      JSON.stringify(rowsToGroups(rows)) !== baselineGroups ||
+      JSON.stringify(cleanLabels(labels)) !== baselineLabels,
+    [rows, baseline, baselineGroups, labels, baselineLabels],
+  );
+  // Every group a key can be given: the registry plus the ones already in use.
+  const groupChoices = useMemo(() => knownGroups(labels, rowsToGroups(rows)), [labels, rows]);
+  const groupsInUse = useMemo(() => {
+    const vars = rowsToEnv(rows);
+    return Object.fromEntries(groupCounts(vars, rowsToGroups(rows)).filter((g) => g.group !== "default").map((g) => [g.group, g.keys]));
+  }, [rows]);
   const canWrite = accessLevel === "write" || accessLevel === "manage";
   const canShareEnv = hasCap(accessLevel, accessCaps, "share");
   const canRotateEnv = hasCap(accessLevel, accessCaps, "rotate");
@@ -275,8 +293,12 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     setError(null);
     try {
       const envData = await getEnv(session, projectName, envName, dek);
-      setRows(toRows(envData.env));
+      setRows(toRows(envData.env, envData.groups));
       setBaseline(JSON.stringify(envData.env));
+      setBaselineGroups(JSON.stringify(rowsToGroups(toRows(envData.env, envData.groups))));
+      setLabels(envData.labels);
+      setBaselineLabels(JSON.stringify(cleanLabels(envData.labels)));
+      setGroupsOpen(false);
       setUpdatedAt(envData.updatedAt);
       setEnvDek(dek);
       setAccessLevel(level);
@@ -449,10 +471,16 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     setError(null);
     try {
       const env = rowsToEnv(rows);
-      const saved = await saveEnv(session, selected, selectedEnv, env, envDek, updatedAt, pendingNote ?? undefined);
+      const groups = rowsToGroups(rows);
+      const bad = Object.values(groups).map(validateGroupName).find((m) => m !== null);
+      if (bad) throw new Error(bad);
+      const saved = await saveEnv(session, selected, selectedEnv, env, { groups, labels }, envDek, updatedAt, pendingNote ?? undefined);
       setPendingNote(null);
-      setRows(toRows(saved.env));
+      setRows(toRows(saved.env, saved.groups));
       setBaseline(JSON.stringify(saved.env));
+      setBaselineGroups(JSON.stringify(saved.groups));
+      setLabels(saved.labels);
+      setBaselineLabels(JSON.stringify(saved.labels));
       setUpdatedAt(saved.updatedAt);
       setStatus("Saved");
       await refreshProjects(selected);
@@ -465,7 +493,7 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
   }
 
   /** Load an older version into the editor as an unsaved draft (saving it adds a new version). */
-  async function onRestoreVersion(env: Record<string, string>, version: number) {
+  async function onRestoreVersion(env: Record<string, string>, grouping: { groups: Record<string, string>; labels: string[] }, version: number) {
     if (dirty) {
       const ok = await confirm({
         title: "Replace your unsaved edits?",
@@ -475,7 +503,8 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
       });
       if (!ok) return;
     }
-    setRows(toRows(env));
+    setRows(toRows(env, grouping.groups));
+    setLabels(grouping.labels);
     setPendingNote(`Restored from v${version}`);
     setProjectPane("env");
     setStatus(null);
@@ -530,7 +559,7 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
   }
 
   function updateRow(id: string, patch: Partial<EnvRow>) {
-    if (!canWrite && ("key" in patch || "value" in patch)) return;
+    if (!canWrite && ("key" in patch || "value" in patch || "group" in patch)) return;
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
     setStatus(null);
   }
@@ -539,7 +568,7 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     if (!canWrite) return;
     setRows((prev) => [
       ...prev,
-      { id: `new-${Date.now()}`, key: "", value: "", revealed: true },
+      { id: `new-${Date.now()}`, key: "", value: "", revealed: true, group: "" },
     ]);
     setStatus(null);
   }
@@ -557,7 +586,8 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     try {
       const { format, env } = detectAndParseImport(importText);
       const next = mode === "replace" ? env : { ...rowsToEnv(rows), ...env };
-      setRows(toRows(next));
+      // imported text has no groups: keys that were already here keep theirs
+      setRows(toRows(next, rowsToGroups(rows)));
       setStatus(
         `Imported ${Object.keys(env).length} key(s) from ${format === "json" ? "JSON" : ".env"} (${mode})`,
       );
@@ -934,6 +964,10 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                               <Upload />
                               Import
                             </Button>
+                            <Button variant="outline" size="sm" onClick={() => setGroupsOpen((v) => !v)}>
+                              <Tags />
+                              Groups
+                            </Button>
                             <Button variant="outline" size="sm" onClick={addRow}>
                               <Plus />
                               Add key
@@ -1180,10 +1214,14 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                         </div>
                       )}
 
+                      {groupsOpen && (
+                        <GroupRegistry labels={labels} inUse={groupsInUse} canWrite={canWrite} onChange={(next) => { setLabels(next); setStatus(null); }} />
+                      )}
                       <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
-                        <div className="hidden grid-cols-[minmax(8rem,1fr)_minmax(12rem,2fr)_auto] gap-2 border-b bg-muted/50 px-4 py-2.5 sm:grid text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        <div className="hidden grid-cols-[minmax(8rem,1fr)_minmax(12rem,2fr)_7rem_auto] gap-2 border-b bg-muted/50 px-4 py-2.5 sm:grid text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                           <span>Key</span>
                           <span>Value</span>
+                          <span title="Which Secret or ConfigMap a Kubernetes link puts this key in">Group</span>
                           <span className="w-24 text-right">{rows.length} total</span>
                         </div>
                         {rows.length === 0 ? (
@@ -1202,7 +1240,7 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                           rows.map((row) => (
                             <div
                               key={row.id}
-                              className="group grid grid-cols-[1fr_auto] items-center gap-x-2 border-b px-3 py-1 transition-colors last:border-b-0 hover:bg-muted/40 sm:grid-cols-[minmax(8rem,1fr)_minmax(12rem,2fr)_auto] sm:gap-2"
+                              className="group grid grid-cols-[1fr_auto] items-center gap-x-2 border-b px-3 py-1 transition-colors last:border-b-0 hover:bg-muted/40 sm:grid-cols-[minmax(8rem,1fr)_minmax(12rem,2fr)_7rem_auto] sm:gap-2"
                             >
                               <Input
                                 className="h-9 border-transparent bg-transparent font-mono text-[13px] font-medium shadow-none hover:border-input focus-visible:bg-card"
@@ -1221,6 +1259,20 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                                 spellCheck={false}
                                 readOnly={!canWrite}
                               />
+                              <select
+                                className="col-span-2 h-9 rounded-md border border-transparent bg-transparent px-2 font-mono text-[12px] text-muted-foreground hover:border-input focus-visible:bg-card focus-visible:text-foreground disabled:opacity-70 sm:col-span-1"
+                                value={row.group || "default"}
+                                onChange={(e) => updateRow(row.id, { group: e.target.value === "default" ? "" : e.target.value })}
+                                aria-label={`Group of ${row.key || "this key"}`}
+                                disabled={!canWrite}
+                              >
+                                <option value="default">default</option>
+                                {groupChoices.map((g) => (
+                                  <option key={g} value={g}>
+                                    {g}
+                                  </option>
+                                ))}
+                              </select>
                               <div className="col-start-2 row-span-2 row-start-1 flex justify-end gap-0.5 opacity-60 sm:col-auto sm:row-auto sm:w-24 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                                 <Button
                                   type="button"

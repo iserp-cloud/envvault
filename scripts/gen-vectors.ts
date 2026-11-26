@@ -13,7 +13,10 @@ import {
   envAad,
   generateDek,
   generateIdentityKeyPair,
+  importAesKey,
+  seal,
   sealEnv,
+  sealEnvData,
   wrapSecretForPublicKey,
 } from "@envvault/shared";
 
@@ -34,6 +37,33 @@ const values = {
 const dek = generateDek();
 const wrappedEnvDek = await wrapSecretForPublicKey(dek, pair.publicKey);
 const payload = await sealEnv(values, dek, envAad(tenantId, project, env));
+
+// The same environment with key groups: the plaintext is {"v":2,"vars":{…},"groups":{…}}.
+const groups = { DATABASE_URL: "db", API_KEY: "api", EMPTY: "api" };
+const groupedPayload = await sealEnvData({ vars: values, groups, labels: [] }, dek, envAad(tenantId, project, env));
+// And with a registry of group names ("queue" is registered but no key is in it yet): `labels` is added.
+const labels = ["api", "db", "queue"];
+const labelledPayload = await sealEnvData({ vars: values, groups, labels }, dek, envAad(tenantId, project, env));
+// Payloads that open fine but are not valid environments: a reader must reject every one.
+const rawKey = await importAesKey(dek);
+const badPlain: Record<string, unknown> = {
+  newerShape: { v: 3, vars: values, groups: {} },
+  groupForMissingKey: { v: 2, vars: values, groups: { NOPE: "db" } },
+  defaultGroupStored: { v: 2, vars: values, groups: { API_KEY: "default" } },
+  invalidGroupName: { v: 2, vars: values, groups: { API_KEY: "Bad Name" } },
+  nonTextValue: { v: 2, vars: { A: 1 }, groups: {} },
+  labelsNotAList: { v: 2, vars: values, groups: {}, labels: "db" },
+  labelNotText: { v: 2, vars: values, groups: {}, labels: [1] },
+  invalidLabel: { v: 2, vars: values, groups: {}, labels: ["Bad Name"] },
+  upperCaseLabel: { v: 2, vars: values, groups: {}, labels: ["DB"] },
+  defaultLabel: { v: 2, vars: values, groups: {}, labels: ["default"] },
+  duplicateLabel: { v: 2, vars: values, groups: {}, labels: ["db", "db"] },
+  tooManyLabels: { v: 2, vars: values, groups: {}, labels: Array.from({ length: 51 }, (_, i) => `g${i}`) },
+};
+const groupedMustFail: Record<string, unknown> = {};
+for (const [why, plain] of Object.entries(badPlain)) {
+  groupedMustFail[why] = await seal(JSON.stringify(plain), rawKey, envAad(tenantId, project, env));
+}
 const token = encodeServiceToken({
   v: 1,
   u: "svc-vectors",
@@ -57,6 +87,24 @@ const vectors = {
     wrappedEnvDek,
     payload,
     expected: values,
+  },
+  /** The same environment with groups. `expected` holds the variables and the group of each key that has one. */
+  groupedEnvironment: {
+    payload: groupedPayload,
+    expected: { vars: values, groups, labels: [] },
+    /** Keys in no group are in "default"; these are what a link for each group receives. */
+    byGroup: {
+      default: { MULTILINE: values.MULTILINE, UNICODE: values.UNICODE },
+      db: { DATABASE_URL: values.DATABASE_URL },
+      api: { API_KEY: values.API_KEY, EMPTY: values.EMPTY },
+    },
+    /** Each of these payloads must be REJECTED. */
+    mustFail: groupedMustFail,
+  },
+  /** The grouped environment plus a registry of group names; `expected.labels` is the registry. A plain reader refuses it. */
+  labelledEnvironment: {
+    payload: labelledPayload,
+    expected: { vars: values, groups, labels },
   },
   /** Each of these must be REJECTED. */
   mustFail: {

@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
-import { mergeEnv, parseEnv, serializeEnv, type EnvMap } from "@envvault/shared";
+import { mergeEnv, normalizeGroup, parseEnv, serializeEnv, validateGroupName, type EnvMap } from "@envvault/shared";
 import { hubGetEnv, hubSaveEnv, isDenied } from "../remote.js";
 import { confirmAction } from "../cli/prompt.js";
 import { resolveTarget, withTarget } from "../cli/target.js";
@@ -18,6 +18,7 @@ type SyncOpts = {
   all?: boolean;
   yes?: boolean;
   skipDenied?: boolean;
+  group?: string;
 };
 
 const SKIP_DENIED = "Report targets you have no access to as skipped instead of failing";
@@ -94,7 +95,8 @@ export function registerData(program: Command): void {
     program
       .command("set")
       .description("Add or change KEY=VALUE pairs in an environment")
-      .argument("<pairs...>", "KEY=VALUE pairs"),
+      .argument("<pairs...>", "KEY=VALUE pairs")
+      .option("--group <name>", "Put these keys in a key group (a Kubernetes link takes one group); `default` takes them out of any group"),
   ).action(async (pairs: string[], opts: SyncOpts) => {
     const overlay: EnvMap = {};
     for (const pair of pairs) {
@@ -104,8 +106,21 @@ export function registerData(program: Command): void {
     }
     const t = await resolveTarget(opts);
     const current = await hubGetEnv(t.config, t.project, t.env, t.tenantId);
-    await hubSaveEnv(t.config, t.project, t.env, mergeEnv(current.env, overlay), t.tenantId, current.updatedAt);
-    success(`Set ${plural(Object.keys(overlay).length, "key")} in ${c.bold(`${t.project}/${t.env}`)}`);
+    const groups = { ...current.groups };
+    if (opts.group !== undefined) {
+      const group = normalizeGroup(opts.group);
+      if (group) {
+        const bad = validateGroupName(group);
+        if (bad) throw new Error(bad);
+      }
+      for (const k of Object.keys(overlay)) {
+        if (group) groups[k] = group;
+        else delete groups[k];
+      }
+    }
+    await hubSaveEnv(t.config, t.project, t.env, mergeEnv(current.env, overlay), { groups, labels: current.labels }, t.tenantId, current.updatedAt);
+    const into = opts.group !== undefined && normalizeGroup(opts.group) ? ` (group ${normalizeGroup(opts.group)})` : "";
+    success(`Set ${plural(Object.keys(overlay).length, "key")} in ${c.bold(`${t.project}/${t.env}`)}${into}`);
   });
 
   withTarget(
@@ -122,7 +137,7 @@ export function registerData(program: Command): void {
     }
     const next = { ...current.env };
     for (const k of keys) delete next[k];
-    await hubSaveEnv(t.config, t.project, t.env, next, t.tenantId, current.updatedAt);
+    await hubSaveEnv(t.config, t.project, t.env, next, { groups: current.groups, labels: current.labels }, t.tenantId, current.updatedAt);
     success(`Removed ${plural(keys.length - missing.length, "key")} from ${c.bold(`${t.project}/${t.env}`)}`);
     if (missing.length) hint(`Not present: ${missing.join(", ")}`);
   });

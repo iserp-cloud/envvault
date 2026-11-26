@@ -26,6 +26,23 @@ type vectors struct {
 		Payload       SealedBox         `json:"payload"`
 		Expected      map[string]string `json:"expected"`
 	} `json:"environment"`
+	Grouped struct {
+		Payload  SealedBox `json:"payload"`
+		Expected struct {
+			Vars   map[string]string `json:"vars"`
+			Groups map[string]string `json:"groups"`
+		} `json:"expected"`
+		ByGroup  map[string]map[string]string `json:"byGroup"`
+		MustFail map[string]SealedBox         `json:"mustFail"`
+	} `json:"groupedEnvironment"`
+	Labelled struct {
+		Payload  SealedBox `json:"payload"`
+		Expected struct {
+			Vars   map[string]string `json:"vars"`
+			Groups map[string]string `json:"groups"`
+			Labels []string          `json:"labels"`
+		} `json:"expected"`
+	} `json:"labelledEnvironment"`
 	MustFail struct {
 		WrongAAD           string    `json:"wrongAad"`
 		BadVersion         SealedBox `json:"badVersion"`
@@ -140,5 +157,125 @@ func TestSealEnvRoundTripsAndBindsLocation(t *testing.T) {
 	again, _ := SealEnv(in, dek, aad)
 	if again.IV == box.IV || again.CT == box.CT {
 		t.Fatal("the IV must be fresh every time")
+	}
+}
+
+func TestOpenGroupedEnvVector(t *testing.T) {
+	v := load(t)
+	tok, _ := DecodeToken(v.ServiceToken)
+	e := v.Environment
+	dek, _ := UnwrapDEK(e.WrappedEnvDek, tok.K)
+	got, err := OpenEnvData(v.Grouped.Payload, dek, e.AAD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Vars, v.Grouped.Expected.Vars) || !reflect.DeepEqual(got.Groups, v.Grouped.Expected.Groups) {
+		t.Fatalf("plaintext differs: %v / %v", got.Vars, got.Groups)
+	}
+	for group, want := range v.Grouped.ByGroup {
+		if g := got.Group(group); !reflect.DeepEqual(g, want) {
+			t.Errorf("group %q: %v, want %v", group, g, want)
+		}
+	}
+	// a caller that cannot handle groups must refuse the environment, not drop them
+	if _, err := OpenEnv(v.Grouped.Payload, dek, e.AAD); err == nil {
+		t.Error("the plain OpenEnv accepted an environment with groups")
+	}
+}
+
+func TestOpenGroupedEnvMustFail(t *testing.T) {
+	v := load(t)
+	tok, _ := DecodeToken(v.ServiceToken)
+	e := v.Environment
+	dek, _ := UnwrapDEK(e.WrappedEnvDek, tok.K)
+	if len(v.Grouped.MustFail) < 5 {
+		t.Fatalf("expected the bad-payload cases, got %d", len(v.Grouped.MustFail))
+	}
+	for why, box := range v.Grouped.MustFail {
+		if _, err := OpenEnvData(box, dek, e.AAD); err == nil {
+			t.Errorf("accepted %s", why)
+		}
+	}
+}
+
+func TestSealEnvDataKeepsGroupsAndStaysPlainWithout(t *testing.T) {
+	dek := make([]byte, 32)
+	aad := EnvAAD("t", "p", "e")
+	in := Env{Vars: map[string]string{"A": "1", "B": "2", "C": "3"}, Groups: map[string]string{"B": "db", "GONE": "x", "C": "default"}}
+	box, err := SealEnvData(in, dek, aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := OpenEnvData(box, dek, aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out.Groups, map[string]string{"B": "db"}) { // a group for a missing key and the default group are not stored
+		t.Fatalf("groups: %v", out.Groups)
+	}
+	plain, _ := SealEnvData(Env{Vars: map[string]string{"A": "1"}}, dek, aad)
+	flat, err := OpenEnv(plain, dek, aad) // no groups: the plain reader still works
+	if err != nil || !reflect.DeepEqual(flat, map[string]string{"A": "1"}) {
+		t.Fatalf("plain: %v %v", flat, err)
+	}
+}
+
+func TestGroupHelpers(t *testing.T) {
+	for in, want := range map[string]string{"": "", "default": "", " DB ": "db", "Default": "", "api": "api"} {
+		if got := NormalizeGroup(in); got != want {
+			t.Errorf("NormalizeGroup(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, ok := range []string{"db", "api-keys", "a1"} {
+		if !ValidGroup(ok) {
+			t.Errorf("%q should be valid", ok)
+		}
+	}
+	for _, bad := range []string{"", "default", "DB", "-x", "a b", "a_b", strings.Repeat("x", 41)} {
+		if ValidGroup(bad) {
+			t.Errorf("%q should be invalid", bad)
+		}
+	}
+}
+
+func TestOpenLabelledEnvVector(t *testing.T) {
+	v := load(t)
+	tok, _ := DecodeToken(v.ServiceToken)
+	e := v.Environment
+	dek, _ := UnwrapDEK(e.WrappedEnvDek, tok.K)
+	got, err := OpenEnvData(v.Labelled.Payload, dek, e.AAD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Vars, v.Labelled.Expected.Vars) || !reflect.DeepEqual(got.Groups, v.Labelled.Expected.Groups) || !reflect.DeepEqual(got.Labels, v.Labelled.Expected.Labels) {
+		t.Fatalf("plaintext differs: %v / %v / %v", got.Vars, got.Groups, got.Labels)
+	}
+	if !got.HasGroups() {
+		t.Error("an environment with a registry is not a plain one")
+	}
+	if _, err := OpenEnv(v.Labelled.Payload, dek, e.AAD); err == nil {
+		t.Error("the plain OpenEnv accepted an environment with a registry")
+	}
+}
+
+// Saving must hand the registry back untouched, or a push from a cluster would erase the dashboard's names.
+func TestSealEnvDataKeepsTheRegistry(t *testing.T) {
+	dek := make([]byte, 32)
+	aad := EnvAAD("t", "p", "e")
+	in := Env{Vars: map[string]string{"A": "1"}, Groups: map[string]string{}, Labels: []string{"queue", "db", "db", "Bad Name", "default"}}
+	box, err := SealEnvData(in, dek, aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := OpenEnvData(box, dek, aad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out.Labels, []string{"db", "queue"}) {
+		t.Fatalf("labels: %v", out.Labels)
+	}
+	plain, _ := SealEnvData(Env{Vars: map[string]string{"A": "1"}}, dek, aad)
+	if _, err := OpenEnv(plain, dek, aad); err != nil {
+		t.Fatalf("no groups and no registry must stay plain: %v", err)
 	}
 }

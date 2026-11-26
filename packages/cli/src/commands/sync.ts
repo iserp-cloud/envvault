@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { levelAtLeast, mergeEnv, parseEnv, serializeEnv, type EnvMap } from "@envvault/shared";
+import { levelAtLeast, mergeEnv, noGroups, parseEnv, serializeEnv, type EnvMap } from "@envvault/shared";
 import { loadConfig, requireSession, type EnvVaultConfig } from "../config.js";
 import { ensureEnvironment, hubEnvironmentAccess, hubGetEnv, hubSaveEnv, isDenied, type AccessLevel } from "../remote.js";
 import { resolveTenantArg, writeSecretFile } from "../cli/helpers.js";
@@ -27,6 +27,22 @@ export function describeCreated(c: { createdProject: boolean; createdEnv: boolea
   return c.createdProject ? "project and environment" : c.createdEnv ? "environment" : "";
 }
 
+/**
+ * The groups and registry to keep when a file replaces an environment's values. A target that is missing or
+ * unreadable has none to keep; any other failure (network, decryption) stops the push, because saving
+ * without them would wipe them all.
+ */
+async function currentGrouping(config: EnvVaultConfig, t: { project: string; env: string; tenantId?: string }) {
+  try {
+    const cur = await hubGetEnv(config, t.project, t.env, t.tenantId);
+    return { groups: cur.groups, labels: cur.labels };
+  } catch (err) {
+    // not there or not readable: the save that follows fails the same way, or creates it with nothing to keep
+    if (isDenied(err)) return noGroups();
+    throw err;
+  }
+}
+
 /** Push a file to one target's environment; with `create`, a missing project / environment is created first. */
 export async function pushTarget(
   config: EnvVaultConfig,
@@ -35,7 +51,10 @@ export async function pushTarget(
   if (!existsSync(t.file)) throw new Error(`File not found: ${rel(t.file)}`);
   const env = parseEnv(readFileSync(t.file, "utf8"));
   const created = t.create ? describeCreated(await ensureEnvironment(config, t.project, t.env, t.tenantId)) : "";
-  const saved = await hubSaveEnv(config, t.project, t.env, env, t.tenantId);
+  // A file has no groups: the keys that stay keep the group they were given in the dashboard. Anyone who can
+  // write an environment can read it, so this does not need more access than the push itself.
+  const grouping = await currentGrouping(config, t);
+  const saved = await hubSaveEnv(config, t.project, t.env, env, grouping, t.tenantId);
   return { keys: Object.keys(env).length, updatedAt: saved.updatedAt, created };
 }
 

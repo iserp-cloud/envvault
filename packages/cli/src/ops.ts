@@ -5,8 +5,8 @@ import {
   formatFingerprint,
   generateDek,
   keyFingerprintHex,
-  openEnv,
-  sealEnv,
+  openEnvData,
+  sealEnvData,
   wrapSecretForPublicKey,
   type AclCap,
   type PinCheck,
@@ -64,12 +64,13 @@ export async function hubHistory(t: Target): Promise<History> {
 export async function hubReadVersion(
   t: Target,
   version: number,
-): Promise<{ env: Record<string, string>; id: string }> {
+): Promise<{ env: Record<string, string>; groups: Record<string, string>; labels: string[]; id: string }> {
   const { client, loc, resolved, aad } = await locate(t);
   const found = (await client.environments.versions.list(loc)).history.find((v) => v.version === version);
   if (!found) throw new Error(historyMiss(version, await client.environments.versions.list(loc)));
   const got = await client.environments.versions.get({ ...loc, id: found.id });
-  return { env: await openEnv(got.payload, resolved.envDek, aad), id: found.id };
+  const data = await openEnvData(got.payload, resolved.envDek, aad);
+  return { env: data.vars, groups: data.groups, labels: data.labels, id: found.id };
 }
 
 function historyMiss(version: number, h: History): string {
@@ -81,10 +82,10 @@ function historyMiss(version: number, h: History): string {
 
 /** Save an earlier version's contents as a new version (the old one stays in history). */
 export async function hubRestoreVersion(t: Target, version: number): Promise<{ updatedAt: string; keys: number }> {
-  const { env } = await hubReadVersion(t, version);
+  const { env, groups, labels } = await hubReadVersion(t, version);
   const current = await hubGetEnv(t.config, t.project, t.env, t.tenantId);
   const saved = await hubSaveEnv(
-    t.config, t.project, t.env, env, t.tenantId, current.updatedAt, `Restored from v${version}`,
+    t.config, t.project, t.env, env, { groups, labels }, t.tenantId, current.updatedAt, `Restored from v${version}`,
   );
   return { updatedAt: saved.updatedAt, keys: Object.keys(env).length };
 }
@@ -157,7 +158,7 @@ export async function hubRotate(
   const { session, client, loc, resolved, aad } = await locate(t);
   const remote = requireRemote(t.config);
   const current = await client.environments.getEnv(loc);
-  const env = await openEnv(current.payload, resolved.envDek, aad);
+  const env = await openEnvData(current.payload, resolved.envDek, aad);
 
   const acl = await client.environments.listAccess(loc);
   const drop = new Set(exclude.map((u) => u.toLowerCase()));
@@ -190,7 +191,7 @@ export async function hubRotate(
   const resealed: Array<{ id: string; version: number; payload: SealedBox }> = [];
   for (const v of exported) {
     try {
-      resealed.push({ id: v.id, version: v.version, payload: await sealEnv(await openEnv(v.payload, resolved.envDek, aad), newDek, aad) });
+      resealed.push({ id: v.id, version: v.version, payload: await sealEnvData(await openEnvData(v.payload, resolved.envDek, aad), newDek, aad) });
     } catch {
       /* corrupt or foreign version: it can't be carried over */
     }
@@ -198,7 +199,7 @@ export async function hubRotate(
   // Everything goes in one request with a size cap: keep the newest versions that fit.
   const request = {
     ...loc,
-    payload: await sealEnv(env, newDek, aad),
+    payload: await sealEnvData(env, newDek, aad),
     keyWraps,
     baseUpdatedAt: current.updatedAt,
   };

@@ -6,7 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import { RPCHandler } from "@orpc/server/fetch";
-import { describeAccess } from "@envvault/shared";
+import { describeAccess, noGroups } from "@envvault/shared";
 import { openDb } from "../src/db/index.js";
 import type { Database } from "../src/db/schema.js";
 import { appRouter } from "../src/rpc/router.js";
@@ -96,6 +96,7 @@ describe("CLI environment operations (against an in-process hub)", () => {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init);
       if (!request.url.startsWith(`${REMOTE}/rpc`)) return realFetch(input, init);
+      if (failReads && request.url.endsWith("/environments/getEnv")) throw new TypeError("fetch failed: network is down");
       if (request.url.endsWith("/environments/rotate")) lastRotateBytes = (await request.clone().text()).length;
       const { response } = await handler.handle(request, {
         prefix: "/rpc",
@@ -115,6 +116,7 @@ describe("CLI environment operations (against an in-process hub)", () => {
   });
 
   let orgId: string;
+  let failReads = false;
   const target = (user: string, env = "default") => ({ config: as(user), project: "app", env, tenantId: orgId });
 
   it("creates a workspace project, keeps a history, restores and deletes versions", async () => {
@@ -125,7 +127,7 @@ describe("CLI environment operations (against an in-process hub)", () => {
 
     for (const [value, note] of [["1", "first"], ["2", undefined], ["3", undefined]] as const) {
       const cur = await hubGetEnv(as("alice"), "app", "default", orgId);
-      await hubSaveEnv(as("alice"), "app", "default", { A: value }, orgId, cur.updatedAt, note);
+      await hubSaveEnv(as("alice"), "app", "default", { A: value }, cur, orgId, cur.updatedAt, note);
     }
     const h = await hubHistory(target("alice"));
     assert.equal(h.current.version, 4);
@@ -175,7 +177,7 @@ describe("CLI environment operations (against an in-process hub)", () => {
 
     // bob can read, write and delete versions…
     assert.deepEqual((await hubGetEnv(as("bob"), "app", "default", orgId)).env, { A: "1" });
-    await hubSaveEnv(as("bob"), "app", "default", { A: "bob" }, orgId);
+    await hubSaveEnv(as("bob"), "app", "default", { A: "bob" }, noGroups(), orgId);
     const hb = await hubHistory(target("bob"));
     await hubDeleteVersion(target("bob"), hb.history[hb.history.length - 1]!.version);
     // …but may not share, see who has access, or re-key.
@@ -204,10 +206,64 @@ describe("CLI environment operations (against an in-process hub)", () => {
     await assert.rejects(hubRotate(target("alice"), ["nobody"]), /doesn't have access/);
   });
 
+  it("keeps key groups and the registry when a key is changed, a file is pushed, a version is restored or the key is rotated", async () => {
+    await hubCreateEnv(as("alice"), "app", "grp", orgId);
+    await hubSaveEnv(as("alice"), "app", "grp", { DB: "d", API: "a", PLAIN: "p" }, { groups: { DB: "db", API: "api" }, labels: ["queue"] }, orgId);
+    const read = () => hubGetEnv(as("alice"), "app", "grp", orgId);
+    assert.deepEqual((await read()).groups, { DB: "db", API: "api" });
+    assert.deepEqual((await read()).labels, ["queue"]);
+
+    // a change that does not mention groups leaves them alone
+    const cur = await read();
+    await hubSaveEnv(as("alice"), "app", "grp", { ...cur.env, PLAIN: "p2" }, cur, orgId, cur.updatedAt);
+    assert.deepEqual((await read()).groups, { DB: "db", API: "api" });
+
+    // pushing a file keeps the groups and the registry of the keys that stay; a new key is in no group
+    const file = join(root, "grp.env");
+    writeFileSync(file, "DB=d2\nAPI=a\nPLAIN=p2\nFRESH=f\n");
+    await pushTarget(as("alice"), { project: "app", env: "grp", file, tenantId: orgId });
+    let now = await read();
+    assert.equal(now.env.DB, "d2");
+    assert.deepEqual(now.groups, { DB: "db", API: "api" });
+    assert.deepEqual(now.labels, ["queue"]);
+
+    // a push that cannot read what is there must stop, not save without the groups
+    failReads = true;
+    try {
+      await assert.rejects(pushTarget(as("alice"), { project: "app", env: "grp", file, tenantId: orgId }), /network is down/);
+    } finally {
+      failReads = false;
+    }
+    assert.deepEqual((await read()).groups, { DB: "db", API: "api" });
+
+    // a key that is removed loses its group; the registry stays
+    const { API: _gone, ...rest } = now.env;
+    await hubSaveEnv(as("alice"), "app", "grp", rest, now, orgId, now.updatedAt);
+    now = await read();
+    assert.deepEqual(now.groups, { DB: "db" });
+    assert.deepEqual(now.labels, ["queue"]);
+
+    // re-keying carries both, in the current version and in the history
+    await hubRotate(target("alice", "grp"));
+    now = await read();
+    assert.deepEqual([now.groups, now.labels], [{ DB: "db" }, ["queue"]]);
+    const withApi = [];
+    for (const v of (await hubHistory(target("alice", "grp"))).history) {
+      const got = await hubReadVersion(target("alice", "grp"), v.version);
+      if ("API" in got.env) withApi.push({ version: v.version, groups: got.groups, labels: got.labels });
+    }
+    assert.ok(withApi.length >= 1, "history still opens under the new key");
+    for (const v of withApi) assert.deepEqual([v.groups, v.labels], [{ DB: "db", API: "api" }, ["queue"]]);
+
+    // restoring an earlier version brings its groups back
+    await hubRestoreVersion(target("alice", "grp"), withApi[0]!.version);
+    assert.deepEqual((await read()).groups, { DB: "db", API: "api" });
+  });
+
   it("re-keying a large history still goes through: the newest versions that fit are kept", async () => {
     await hubCreateEnv(as("alice"), "app", "big", orgId);
     const blob = (n: number) => `${n}`.padEnd(350_000, "x"); // ~470 KB sealed, so 14 saves are ~6.5 MB of history
-    for (let i = 1; i <= 14; i++) await hubSaveEnv(as("alice"), "app", "big", { BLOB: blob(i) }, orgId);
+    for (let i = 1; i <= 14; i++) await hubSaveEnv(as("alice"), "app", "big", { BLOB: blob(i) }, noGroups(), orgId);
     const before = await hubHistory(target("alice", "big"));
     assert.ok(before.history.length >= 12, "a long history to carry over");
 
@@ -231,7 +287,7 @@ describe("CLI environment operations (against an in-process hub)", () => {
   it("tree sync with partial access: failures are per target, --skip-denied skips, dry-run and list show access", async () => {
     // alice: env `dir3`, and bob gets READ on it only. bob has nothing on `default`.
     await hubCreateEnv(as("alice"), "app", "dir3", orgId);
-    await hubSaveEnv(as("alice"), "app", "dir3", { B: "2" }, orgId);
+    await hubSaveEnv(as("alice"), "app", "dir3", { B: "2" }, noGroups(), orgId);
     await hubGrantAccess(target("alice", "dir3"), "bob", "read", [], async () => true);
 
     const tree = join(root, "tree");

@@ -13,12 +13,17 @@ type SecretKeyRef struct {
 	Key string `json:"key,omitempty"`
 }
 
-// TargetSpec is the Kubernetes Secret the operator writes.
+// TargetSpec is the Kubernetes Secret (or ConfigMap) the operator writes.
 type TargetSpec struct {
-	// Name of the Secret. Defaults to the name of this resource.
+	// Kind of object to write: a Secret (the default) or a ConfigMap, for settings that are not sensitive.
+	// +kubebuilder:validation:Enum=Secret;ConfigMap
+	// +kubebuilder:default=Secret
+	// +optional
+	Kind string `json:"kind,omitempty"`
+	// Name of the Secret or ConfigMap. Defaults to the name of this resource.
 	// +optional
 	Name string `json:"name,omitempty"`
-	// Type of the Secret.
+	// Type of the Secret. Ignored for a ConfigMap.
 	// +kubebuilder:default=Opaque
 	// +optional
 	Type string `json:"type,omitempty"`
@@ -61,7 +66,12 @@ type EnvVaultSecretSpec struct {
 	// Environment to read, e.g. `production`.
 	// +kubebuilder:validation:MinLength=1
 	Environment string `json:"environment"`
-	// Target Secret to create and keep up to date.
+	// Group is the key group to write: the keys of the environment that were put in this group in the
+	// dashboard. Empty or `default` means the keys that have no group, which is every key until groups are used.
+	// +kubebuilder:validation:MaxLength=40
+	// +optional
+	Group string `json:"group,omitempty"`
+	// Target Secret or ConfigMap to create and keep up to date.
 	// +optional
 	Target TargetSpec `json:"target,omitempty"`
 	// RefreshInterval between checks of the hub (minimum 10s, default 60s). Only a change is downloaded.

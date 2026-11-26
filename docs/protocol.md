@@ -62,16 +62,31 @@ Every call is recorded in the hub's audit log (`env.read`). Polling is therefore
    - `iv`: base64url, 12 bytes
    - `ct`: base64url, ciphertext followed by a 16-byte GCM tag
    - AES-256-GCM, the AAD above, 128-bit tag
-4. **Parse the plaintext** as a JSON object whose keys and values are all strings. Anything else
-   is a corrupt payload.
+4. **Parse the plaintext.** It has one of two shapes:
+   - **Plain:** a JSON object whose keys and values are all strings. Every key is in the
+     `default` group. This is what an environment without groups is stored as.
+   - **Grouped:** `{"v":2,"vars":{…},"groups":{KEY:group},"labels":[…]}`, recognised by a numeric
+     `v`. `vars` holds string values and `groups` maps a key to its group. `labels` is optional:
+     the environment's registry of group names, which may list names no key is in yet. A reader
+     that writes the environment back must keep it as it found it; one that only reads can ignore
+     it. A reader that only handles the
+     plain shape must **reject** it, not read it as a plain object whose keys are `v`, `vars`
+     and `groups`.
+   A group name matches `^[a-z0-9][a-z0-9-]{0,39}$` and is not `default`; a key with no entry is
+   in `default`. Reject a `v` other than 2, non-string values, an entry for a key that is not in
+   `vars`, `default` written out, and an invalid name. `labels` must be a list of at most 50
+   valid group names, none of them `default`, no duplicates. To write one group, take the keys of that
+   group (`default` means the keys with no entry).
 
 If any step fails, fail closed: change nothing and report that the environment could not be
 opened. Never write partial results.
 
 ## 4. What must be rejected
 
-The vectors include cases that must fail: a different location in the AAD, `v: 2`, and a flipped
-ciphertext byte. A wrong AAD is the protection against the hub swapping payloads between
+The vectors include cases that must fail: a different location in the AAD, `v: 2` on the sealed
+box, and a flipped ciphertext byte. The `groupedEnvironment` vector has a worked grouped payload,
+the keys each group holds, and the grouped payloads that must be rejected. The
+`labelledEnvironment` vector adds a registry. A wrong AAD is the protection against the hub swapping payloads between
 environments, so an implementation that skips the AAD is broken.
 
 ## Not covered here

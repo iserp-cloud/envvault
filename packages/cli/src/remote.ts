@@ -12,12 +12,16 @@ import {
   formatFingerprint,
   generateDek,
   keyFingerprintHex,
-  openEnv,
+  cleanLabels,
+  openEnvData,
+  pruneGroups,
+  type EnvData,
   openPrivateKey,
   openRecoveredPrivateKey,
   privateKeyAad,
   seal,
   sealEnv,
+  sealEnvData,
   unwrapSecretWithPrivateKey,
   wrapSecretForPublicKey,
   type KdfParams,
@@ -68,6 +72,10 @@ export type ProjectEnv = {
   projectName: string;
   updatedAt: string;
   env: Record<string, string>;
+  /** The group of each key that is not in the default group. Carry it back when saving. */
+  groups: Record<string, string>;
+  /** The environment's registry of group names. Carry it back when saving. */
+  labels: string[];
 };
 
 export type KeyWrap = { username: string; wrappedEnvDek: string };
@@ -435,8 +443,17 @@ export async function hubGetEnv(
     tenantId: got.tenantId,
     projectName: got.projectName,
     updatedAt: got.updatedAt,
-    env: await openEnv(got.payload, resolved.envDek, envAad(got.tenantId, project, got.name)),
+    ...(await openEnvAsProject(got.payload, resolved.envDek, envAad(got.tenantId, project, got.name))),
   };
+}
+
+async function openEnvAsProject(
+  payload: SealedBox,
+  dek: string,
+  aad: string,
+): Promise<{ env: Record<string, string>; groups: Record<string, string>; labels: string[] }> {
+  const data = await openEnvData(payload, dek, aad);
+  return { env: data.vars, groups: data.groups, labels: data.labels };
 }
 
 export async function hubSaveEnv(
@@ -444,6 +461,8 @@ export async function hubSaveEnv(
   project: string,
   envName: string,
   env: Record<string, string>,
+  /** Groups and registry to keep: pass what hubGetEnv returned (a key that is gone loses its group). `noGroups()` for none. */
+  grouping: Pick<EnvData, "groups" | "labels">,
   tenantId?: string,
   /** Reject the write if the environment changed since this updatedAt. */
   baseUpdatedAt?: string,
@@ -457,7 +476,7 @@ export async function hubSaveEnv(
       tenantId: resolved.tenantId,
       project,
       name: resolved.name,
-      payload: await sealEnv(env, resolved.envDek, envAad(resolved.tenantId, project, resolved.name)),
+      payload: await sealEnvData({ vars: env, ...grouping }, resolved.envDek, envAad(resolved.tenantId, project, resolved.name)),
       baseUpdatedAt,
       note: note || undefined,
     })
@@ -468,6 +487,8 @@ export async function hubSaveEnv(
     projectName: project,
     updatedAt: saved.updatedAt,
     env,
+    groups: pruneGroups(env, grouping.groups),
+    labels: cleanLabels(grouping.labels),
   };
 }
 
