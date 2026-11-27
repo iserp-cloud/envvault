@@ -91,6 +91,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { isUnauthorized } from "@/lib/auth-errors";
 import { useLivePolling } from "@/lib/live";
+import { formatRoute, parseRoute, type AppPage, type ProjectPane } from "@/lib/route";
 import { formatDate, rowsToEnv, rowsToGroups, toRows, type EnvRow } from "@/lib/env-rows";
 import {
   detectAndParseImport,
@@ -100,8 +101,6 @@ import {
 } from "./env-import";
 import { useConfirm } from "@/components/ConfirmDialog";
 
-type AppPage = "projects" | "settings" | "admin";
-type ProjectPane = "env" | "settings" | "history" | "kubernetes";
 
 type Props = {
   session: Session;
@@ -111,6 +110,9 @@ type Props = {
   onAuthFailure: () => void;
 };
 
+/** Browsers that can mask a plain text field with CSS: used instead of a password field (see the value cells). */
+const MASK_WITH_CSS = typeof CSS !== "undefined" && CSS.supports("-webkit-text-security", "disc");
+
 /** Keep the previous value (so React skips the re-render and dependent effects) when equal. */
 function unchanged<T>(prev: T, next: T): T {
   return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
@@ -118,14 +120,19 @@ function unchanged<T>(prev: T, next: T): T {
 
 export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFailure }: Props) {
   const confirm = useConfirm();
-  const [page, setPage] = useState<AppPage>("projects");
-  const [projectPane, setProjectPane] = useState<ProjectPane>("env");
+  // Where you were before a refresh, from the URL hash (see lib/route.ts).
+  const [start] = useState(() => parseRoute(window.location.hash));
+  const [page, setPage] = useState<AppPage>(start.page);
+  const [projectPane, setProjectPane] = useState<ProjectPane>(start.pane);
+  // The panel is reset when a different environment is opened, not when the same one reloads (a refresh keeps
+  // the panel the URL named).
+  const loadedEnvKey = useRef<string | null>(start.project && start.env ? `${start.project}\0${start.env}` : null);
   const [tenants, setTenants] = useState<TenantMeta[]>([]);
   const [invites, setInvites] = useState<TenantInvite[]>([]);
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(start.project);
   const [environments, setEnvironments] = useState<EnvMeta[]>([]);
-  const [selectedEnv, setSelectedEnv] = useState<string | null>(null);
+  const [selectedEnv, setSelectedEnv] = useState<string | null>(start.env);
   const [envDek, setEnvDek] = useState<string | null>(null);
   const [accessLevel, setAccessLevel] = useState<"read" | "write" | "manage">("read");
   const [accessCaps, setAccessCaps] = useState("");
@@ -327,7 +334,9 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
       setImportText("");
       setImportHint(null);
       setPendingNote(null);
-      setProjectPane("env");
+      const envKey = `${projectName}\0${envName}`;
+      if (loadedEnvKey.current !== envKey) setProjectPane("env");
+      loadedEnvKey.current = envKey;
       if (hasCap(level, caps, "share") || hasCap(level, caps, "rotate")) {
         setAccessList(await listEnvironmentAccess(session, projectName, envName));
       } else {
@@ -440,6 +449,12 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, selectedEnv, environments]);
+
+  // Keep the URL in step with where you are, without adding history entries.
+  useEffect(() => {
+    const hash = formatRoute({ page, project: selected, env: selectedEnv, pane: projectPane });
+    if (window.location.hash !== hash) window.history.replaceState(null, "", hash);
+  }, [page, selected, selectedEnv, projectPane]);
 
   async function onSwitchTenant(tenantId: string) {
     const next = { ...session, activeTenantId: tenantId };
@@ -1308,8 +1323,16 @@ export function VaultApp({ session, onLock, onSignOut, onSessionUpdate, onAuthFa
                                 readOnly={!canWrite}
                               />
                               <Input
-                                className="h-9 border-transparent bg-transparent font-mono text-[13px] shadow-none hover:border-input focus-visible:bg-card"
-                                type={row.revealed ? "text" : "password"}
+                                className={cn(
+                                  "h-9 border-transparent bg-transparent font-mono text-[13px] shadow-none hover:border-input focus-visible:bg-card",
+                                  !row.revealed && MASK_WITH_CSS && "[-webkit-text-security:disc]",
+                                )}
+                                // A masked value is not a password: a real password field turns on macOS secure input
+                                // (the lock in the menu bar) whenever it has focus, so mask with CSS where we can.
+                                type={row.revealed || MASK_WITH_CSS ? "text" : "password"}
+                                autoComplete="off"
+                                data-1p-ignore
+                                data-lpignore="true"
                                 value={row.value}
                                 onChange={(e) => updateRow(row.id, { value: e.target.value })}
                                 placeholder="value"
