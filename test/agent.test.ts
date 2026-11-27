@@ -78,7 +78,7 @@ describe("envvault skill", () => {
     assert.match(text, /^---\nname: envvault\ndescription: /);
     assert.match(text, /CLI 9\.9\.9/);
     assert.ok(!text.includes("{{version}}"));
-    for (const must of ["# @group", "push --groups", "envvault check", "REPLACES the whole environment", "Never print"]) {
+    for (const must of ["# @group", "--no-groups", "envvault check", "REPLACES the whole environment", "Never print"]) {
       assert.ok(text.includes(must), must);
     }
   });

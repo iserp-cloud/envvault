@@ -117,6 +117,8 @@ Equivalent JSON uses `"tree": { "web": { "path": "apps/web", "children": { … }
 
 `push` normally needs the project and environment to exist. With `create = true` in the config (or `--create` on `push` / `tree push`), a missing **project** and **environment** are created first and then filled, so a fresh hub can be set up straight from the config. Both are created under your own key like any other, so everyone with access in the workspace can open them. Creating a project also creates its `default` environment.
 
+Run in a terminal without `--create`, a plain `envvault push` to something that isn't there asks "Create it and push?" first (the hub can't tell a missing name from one hidden from you, so the question says both). Declining cancels; `--yes` answers it for you. In scripts, with no terminal, it fails with a hint to add `--create`, so a typo can't make a new project by accident.
+
 - **The workspace is never created.** If `workspace` names one you don't belong to, the command stops with `Workspace not found` and lists yours.
 - **Nothing is overwritten.** If the name exists but you can't open it, the CLI says so instead of replacing it. Creating needs the same permission as `project create` / `env create`, and service tokens can't create.
 - `tree push -n --create` shows what would be created without changing anything.
@@ -250,7 +252,7 @@ envvault get                          # everything, as dotenv text
 | `-p, --project` | config, then saved default | Project |
 | `-e, --env` | config, then `default` | Environment |
 | `-t, --tenant`, `-w, --workspace` | config, then active workspace | Workspace slug or id (it must exist) |
-| `--groups` (`push`, `pull`, `tree push`, `tree pull`) | off | `push`: read `# @group name` lines as key groups and add the names to the environment's list. `pull`: write a `# @group name` line above each group's keys. Without it the markers are ordinary comments (a push says so when the file has some). |
+| `--groups` / `--no-groups` (`push`, `pull`, `tree push`, `tree pull`) | follows the file | By default a `push` reads `# @group name` lines when the file has them (and adds the names to the environment's list), and a `pull` writes them when the environment has groups. `--no-groups` treats them as ordinary comments (a push says so when the file has some). `--groups` forces them on: a push then takes the file as the whole truth, so with no markers every key goes to the default group. |
 | `--group` (`set` only) | unchanged | Key group for the keys being set. `push`, `set`, `unset`, restore and re-key keep the groups of the keys that stay and the environment's list of group names (a push stops if it cannot read them, instead of saving without); `pull` and `get` print the values without them. |
 | `-f, --file` | `.env`, or the config's `file` | Local file (`pull`, `push`) |
 | `--merge` | | (`pull`) merge into the existing file |
@@ -333,7 +335,7 @@ DB_PASSWORD=…
 STRIPE_KEY=sk_…
 ```
 
-Only a `# @group name` line of its own counts. It applies to the keys below it until the next one, and `# @group default` goes back to the default group. Plain comments, blank lines and commented-out keys mean nothing. A bad name stops the push and names the line. `envvault push --groups` makes the file's groups the environment's groups, so a key not under any marker goes back to the default group, and names the file uses join the environment's list. The dashboard's import and export read and write the same markers, and a JSON object nested under a group name (`{"db": {"DATABASE_URL": "…"}}`).
+Only a `# @group name` line of its own counts. It applies to the keys below it until the next one, and `# @group default` goes back to the default group. Plain comments, blank lines and commented-out keys mean nothing. A bad name stops the push and names the line. A `push` of a file with markers makes the file's groups the environment's groups, so a key not under any marker goes back to the default group, and names the file uses join the environment's list. A file with no markers leaves the environment's groups alone. The dashboard's import and export read and write the same markers, and a JSON object nested under a group name (`{"db": {"DATABASE_URL": "…"}}`).
 
 ## For coding agents: `skill`, `check` and `--json`
 

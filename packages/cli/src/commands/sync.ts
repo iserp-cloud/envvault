@@ -21,8 +21,9 @@ import { filterTargets, type TreeTarget } from "../tree.js";
 import { c, hint, info, messageOf, plural, rel, success, warn } from "../ui.js";
 
 /**
- * Pull one target's environment into its file. With `groups`, the file gets a `# @group name` line above each
- * group's keys; without it the file is plain KEY=value, as always.
+ * Pull one target's environment into its file. When the environment has key groups the file gets a
+ * `# @group name` line above each group's keys (`groups: true` always, `groups: false` never); with none it is
+ * plain KEY=value, as always.
  */
 export async function pullTarget(
   config: EnvVaultConfig,
@@ -31,20 +32,39 @@ export async function pullTarget(
   const loaded = await hubGetEnv(config, t.project, t.env, t.tenantId);
   let env: EnvMap = loaded.env;
   let groups: Record<string, string> = loaded.groups;
-  if (t.merge && existsSync(t.file)) {
-    const text = readFileSync(t.file, "utf8");
-    if (t.groups) {
-      const old = parseEnvGroups(text);
-      env = mergeEnv(old.vars, loaded.env);
-      groups = { ...old.groups, ...loaded.groups };
+  const old = t.merge && existsSync(t.file) ? readFileSync(t.file, "utf8") : null;
+  const withGroups = t.groups ?? (Object.keys(loaded.groups).length > 0 || (old !== null && hasGroupMarkers(old)));
+  if (old !== null) {
+    const text = old;
+    if (withGroups) {
+      const prev = parseEnvGroups(text);
+      env = mergeEnv(prev.vars, loaded.env);
+      groups = { ...prev.groups, ...loaded.groups };
       for (const key of Object.keys(loaded.env)) if (!loaded.groups[key]) delete groups[key];
     } else {
       env = mergeEnv(parseEnv(text), loaded.env);
     }
   }
   mkdirSync(dirname(t.file), { recursive: true });
-  writeSecretFile(t.file, t.groups ? serializeEnvGroups(env, groups) : serializeEnv(env));
+  writeSecretFile(t.file, withGroups ? serializeEnvGroups(env, groups) : serializeEnv(env));
   return { keys: Object.keys(env).length };
+}
+
+/**
+ * Whether the environment is there for you to push to. The hub does not say whether a name is absent or hidden from
+ * you, so false means "not found or no access". Unknown (offline, a failed lookup) counts as there, so the push
+ * itself reports the real problem.
+ */
+export async function targetExists(
+  config: EnvVaultConfig,
+  t: { project: string; env: string; tenantId?: string },
+): Promise<boolean> {
+  try {
+    const name = t.env.trim().toLowerCase() || "default";
+    return (await hubEnvironmentAccess(config, t.project, t.tenantId)).some((e) => e.name === name);
+  } catch {
+    return true;
+  }
 }
 
 /** What creating a missing target added on the hub, in words ("project and environment", …), or "". */
@@ -70,9 +90,10 @@ async function currentGrouping(config: EnvVaultConfig, t: { project: string; env
 
 /**
  * Push a file to one target's environment; with `create`, a missing project / environment is created first.
- * With `groups`, the file's `# @group name` lines decide each key's group and the names join the environment's
- * registry. Without it the file has no groups: keys that stay keep the group they were given in the dashboard,
- * and `markersIgnored` says the file had markers that were left alone.
+ * A file with `# @group name` lines has them decide each key's group, and the names join the environment's
+ * registry (`groups: false` ignores them and `markersIgnored` says so). A file with none has no say about groups:
+ * keys that stay keep the group they were given in the dashboard. `groups: true` reads the file as the whole truth
+ * even with no markers, which puts every key in the default group.
  */
 export async function pushTarget(
   config: EnvVaultConfig,
@@ -80,7 +101,8 @@ export async function pushTarget(
 ): Promise<{ keys: number; updatedAt: string; created: string; markersIgnored: boolean }> {
   if (!existsSync(t.file)) throw new Error(`File not found: ${rel(t.file)}`);
   const text = readFileSync(t.file, "utf8");
-  const parsed = t.groups ? parseEnvGroups(text) : { vars: parseEnv(text), groups: undefined };
+  const withGroups = t.groups ?? hasGroupMarkers(text);
+  const parsed = withGroups ? parseEnvGroups(text) : { vars: parseEnv(text), groups: undefined };
   const env = parsed.vars;
   const created = t.create ? describeCreated(await ensureEnvironment(config, t.project, t.env, t.tenantId)) : "";
   // Anyone who can write an environment can read it, so this does not need more access than the push itself.
@@ -93,11 +115,11 @@ export async function pushTarget(
     keys: Object.keys(env).length,
     updatedAt: saved.updatedAt,
     created,
-    markersIgnored: !t.groups && hasGroupMarkers(text),
+    markersIgnored: t.groups === false && hasGroupMarkers(text),
   };
 }
 
-const MARKERS_IGNORED = "The file has # @group lines that were left out; add --groups to apply them.";
+const MARKERS_IGNORED = "The file has # @group lines that were left out because of --no-groups.";
 
 export type TreeSyncOptions = {
   config?: string;
@@ -111,7 +133,7 @@ export type TreeSyncOptions = {
   interactive?: boolean;
   /** Push: create missing projects / environments for every target (a target's own `create` setting also counts). */
   create?: boolean;
-  /** `--groups`: read and write `# @group` lines. */
+  /** `--groups` / `--no-groups`: always / never read and write `# @group` lines; unset follows the file (push) or the environment (pull). */
   groups?: boolean;
 };
 

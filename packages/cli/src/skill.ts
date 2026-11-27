@@ -24,8 +24,9 @@ them with a local \`.env\` file. Run \`envvault --help\` or \`envvault <command>
 - Never commit a \`.env\` file, and never remove \`.env\` from \`.gitignore\`.
 - \`envvault push\` REPLACES the whole environment with the file: a key missing from the file is removed. For
   one key use \`envvault set KEY=value\` instead. Pull before you push so you do not overwrite someone's change.
-- Do not add \`--yes\` (skips the empty-file confirmation) or \`--create\` (creates projects/environments) unless
-  the user asked for it.
+- Do not add \`--yes\` (answers its questions, including "create it?") or \`--create\` (creates missing
+  projects/environments) unless the user asked for it. A push to a name that is not there fails by design when
+  there is no terminal: ask the user before creating it.
 - Do not log in, sign up or change access (\`access grant/revoke\`, \`rotate\`) on your own. If you see
   "Not logged in", tell the user to run \`envvault login\`.
 
@@ -65,9 +66,10 @@ or digit); \`default\` cannot be named as a real group.
 - In a \`.env\` file, a line \`# @group db\` puts the keys below it in \`db\` until the next marker.
   \`# @group default\` goes back to the default group. Only a \`# @group\` line counts; ordinary comments and blank
   lines never change a group.
-- \`envvault push --groups\` reads those markers (the file's groups become the environment's groups; a key under no
-  marker goes back to \`default\`). \`envvault pull --groups\` writes them. WITHOUT \`--groups\` a push ignores the
-  markers (it tells you) and the keys that stay keep the groups they have.
+- \`envvault push\` reads those markers by itself (the file's groups become the environment's groups; a key above
+  the first marker is \`default\`). A file with no markers leaves the environment's groups as they are.
+  \`envvault pull\` writes the markers when the environment has groups. \`--no-groups\` ignores them either way;
+  \`--groups\` forces them on (on a push, even with no markers, which puts every key in \`default\`).
 - \`envvault set KEY=value --group db\` sets the group of the keys being set; \`--group default\` clears it.
 - Put secrets in a Secret link. A group that a ConfigMap link writes is readable by anyone who can read
   ConfigMaps in that namespace, so keep passwords, tokens and keys out of it.
@@ -109,7 +111,7 @@ Environment variables are managed with the \`envvault\` CLI. Run \`envvault skil
 - \`envvault push\` replaces the whole environment from the file; use \`envvault set KEY=value\` for one key, and
   \`envvault pull\` first.
 - Check a file before pushing: \`envvault check .env\`.
-- Groups in a \`.env\` are \`# @group name\` lines, read only with \`push --groups\` / written by \`pull --groups\`.
+- Groups in a \`.env\` are \`# @group name\` lines; push and pull handle them without a flag.
   Keep secrets out of groups that a ConfigMap link writes.
 - Do not log in, create projects, or change access without being asked.
 <!-- envvault:end -->

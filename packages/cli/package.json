@@ -1,6 +1,6 @@
 {
   "name": "@iserp/envvault",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "description": "EnvVault CLI — sync encrypted env files with your hub",
   "type": "module",
   "license": "MIT",

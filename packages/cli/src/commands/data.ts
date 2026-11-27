@@ -4,7 +4,7 @@ import { mergeEnv, normalizeGroup, parseEnv, serializeEnv, validateGroupName, ty
 import { hubGetEnv, hubSaveEnv, isDenied } from "../remote.js";
 import { confirmAction } from "../cli/prompt.js";
 import { resolveTarget, withTarget } from "../cli/target.js";
-import { pullTarget, pushTarget, syncTree, wantsWholeTree } from "./sync.js";
+import { pullTarget, pushTarget, syncTree, targetExists, wantsWholeTree } from "./sync.js";
 import { c, hint, info, messageOf, plural, printJson, rel, success } from "../ui.js";
 
 type SyncOpts = {
@@ -51,7 +51,8 @@ export function registerData(program: Command): void {
       .argument("[project]", "Project name (same as -p)")
       .option("-f, --file <path>", "Output file (default: .env, or the file set in your config)")
       .option("--merge", "Merge into the existing file instead of replacing it")
-      .option("--groups", "Write a `# @group name` line above each group's keys")
+      .option("--groups", "Always write `# @group name` lines (by default only when the environment has groups)")
+      .option("--no-groups", "Never write `# @group name` lines")
       .option("--all", "Pull every target in envvault.toml/json, from any directory below it")
       .option("--json", JSON_OPTION)
       .option("--skip-denied", SKIP_DENIED),
@@ -79,7 +80,8 @@ export function registerData(program: Command): void {
       .option("-f, --file <path>", "Source file (default: .env, or the file set in your config)")
       .option("--all", "Push every target in envvault.toml/json, from any directory below it")
       .option("-y, --yes", "Don't ask before pushing an empty file")
-      .option("--groups", "Read `# @group name` lines as key groups (names join the environment's list of groups)")
+      .option("--groups", "Always read the file's groups, even with no `# @group` lines (that puts every key in default)")
+      .option("--no-groups", "Ignore `# @group name` lines in the file")
       .option("--create", "Create the project / environment first if it doesn't exist (or set create = true in the config)")
       .option("--json", JSON_OPTION)
       .option("--skip-denied", SKIP_DENIED),
@@ -97,9 +99,21 @@ export function registerData(program: Command): void {
       );
       if (!ok) return hint("Cancelled.");
     }
+    // A push to something that is not there: in a terminal, offer to create it; in a script, say how.
+    let create = t.ctx.create;
+    if (!create && process.stdin.isTTY && !opts.json && !(await targetExists(t.config, t))) {
+      create = await confirmAction(
+        `${t.project}/${t.env} was not found (or is hidden from you). Create it and push ${rel(t.ctx.file)}?`,
+        opts.yes,
+      );
+      if (!create) return hint("Cancelled.");
+    }
     await orSkip(opts.skipDenied, `${t.project}/${t.env}`, async () => {
       const { keys, updatedAt, created, markersIgnored } = await pushTarget(t.config, {
-        project: t.project, env: t.env, file: t.ctx.file, tenantId: t.tenantId, create: t.ctx.create, groups: opts.groups,
+        project: t.project, env: t.env, file: t.ctx.file, tenantId: t.tenantId, create, groups: opts.groups,
+      }).catch((err: unknown) => {
+        if (!create && isDenied(err)) hint("If it doesn't exist yet, `envvault push --create` (or create = true in envvault.toml) creates it.");
+        throw err;
       });
       if (opts.json) {
         return printJson({
@@ -108,7 +122,7 @@ export function registerData(program: Command): void {
         });
       }
       success(`Pushed ${plural(keys, "var")} ← ${rel(t.ctx.file)}  ${c.dim(`(${t.project}/${t.env}, ${updatedAt})`)}${created ? `  ${c.green(`created ${created}`)}` : ""}`);
-      if (markersIgnored) hint("The file has # @group lines that were left out; add --groups to apply them.");
+      if (markersIgnored) hint("The file has # @group lines that were left out because of --no-groups.");
     });
   });
 

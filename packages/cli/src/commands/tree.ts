@@ -95,9 +95,10 @@ export function registerTree(program: Command): void {
       .option(
         "--groups",
         direction === "pull"
-          ? "Write a `# @group name` line above each group's keys"
-          : "Read `# @group name` lines as key groups",
-      );
+          ? "Always write `# @group name` lines (by default only when the environment has groups)"
+          : "Always read the file's groups, even with no `# @group` lines",
+      )
+      .option("--no-groups", direction === "pull" ? "Never write `# @group name` lines" : "Ignore `# @group name` lines in the file");
     if (direction === "push") {
       cmd.option("--create", "Create missing projects and environments first (or set create = true in the config)");
     }
