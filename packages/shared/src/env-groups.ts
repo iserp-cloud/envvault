@@ -9,6 +9,12 @@ import { DEFAULT_GROUP, normalizeGroup, validateGroupName } from "./groups.js";
  */
 const MARKER = /^\s*#\s*@group(?:\s+(.*?))?\s*$/i;
 
+/** The name on a `# @group name` line ("" when it has none), or null when the line is not a marker. */
+export function groupMarker(line: string): string | null {
+  const m = MARKER.exec(line);
+  return m ? (m[1] ?? "").trim() : null;
+}
+
 export type GroupSection = { group: string; text: string };
 
 /** Split a .env file at its `# @group` lines. `group` is "" for the default group. Throws, naming the line, on a bad name. */

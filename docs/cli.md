@@ -334,3 +334,24 @@ STRIPE_KEY=sk_…
 ```
 
 Only a `# @group name` line of its own counts. It applies to the keys below it until the next one, and `# @group default` goes back to the default group. Plain comments, blank lines and commented-out keys mean nothing. A bad name stops the push and names the line. `envvault push --groups` makes the file's groups the environment's groups, so a key not under any marker goes back to the default group, and names the file uses join the environment's list. The dashboard's import and export read and write the same markers, and a JSON object nested under a group name (`{"db": {"DATABASE_URL": "…"}}`).
+
+## For coding agents: `skill`, `check` and `--json`
+
+```bash
+envvault skill                    # print the guide: how to use EnvVault and write a correct .env
+envvault skill install            # write .claude/skills/envvault/SKILL.md and an AGENTS.md section here
+envvault skill install --global   # the Claude Code skill for your user (~/.claude/skills)
+envvault skill install --target agents   # only the AGENTS.md section (or `claude`)
+```
+
+The guide ships inside the CLI, so it always matches the installed version; run `skill install` again after upgrading. In `AGENTS.md` only the block between the `envvault:start` / `envvault:end` comments is managed; the rest of the file is never touched. It tells an agent never to print or commit secret values, that `push` replaces the whole environment (use `set` for one key), how `.env` files and `# @group` lines are written, and which commands to use.
+
+```bash
+envvault check [files...]         # default: .env. Nothing is sent to the hub; no login needed
+envvault check .env --json        # { ok, errors, warnings, files: [{ file, keys, groups, issues: [{ line, level, code, message }] }] }
+envvault check .env --strict      # warnings fail too
+```
+
+`check` exits 1 on errors: a line that is not `KEY=value`, an `export` prefix, an unusable key name, an unterminated quote, a bad `# @group` name. It warns about `value # note` (which keeps the note), duplicate keys, empty values, lower-case keys and sensitive-looking keys in a group that reads like plain settings.
+
+`--json` works on `get` (the values, each key's group, and the list of group names), on `push` and `pull` for one target, and on `env list`, `history`, `access list`, `tree list` and `whoami`.

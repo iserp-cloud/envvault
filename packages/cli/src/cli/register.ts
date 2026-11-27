@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { registerAgent } from "../commands/agent.js";
 import { registerAccess } from "../commands/access.js";
 import { registerAuth } from "../commands/auth.js";
 import { registerData } from "../commands/data.js";
@@ -20,4 +21,5 @@ export function registerCommands(program: Command): void {
   registerHistory(program);
   registerAccess(program);
   registerRotate(program);
+  registerAgent(program);
 }
