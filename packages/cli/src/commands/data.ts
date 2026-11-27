@@ -4,8 +4,8 @@ import { mergeEnv, normalizeGroup, parseEnv, serializeEnv, validateGroupName, ty
 import { hubGetEnv, hubSaveEnv, isDenied } from "../remote.js";
 import { confirmAction } from "../cli/prompt.js";
 import { resolveTarget, withTarget } from "../cli/target.js";
-import { pullTarget, pushTarget, syncTree, wantsWholeTree } from "./sync.js";
-import { c, hint, info, messageOf, plural, rel, success } from "../ui.js";
+import { pullTarget, pushTarget, syncTree, targetExists, wantsWholeTree } from "./sync.js";
+import { c, hint, info, messageOf, plural, printJson, rel, success } from "../ui.js";
 
 type SyncOpts = {
   project?: string;
@@ -19,6 +19,13 @@ type SyncOpts = {
   yes?: boolean;
   skipDenied?: boolean;
   group?: string;
+  groups?: boolean;
+  json?: boolean;
+};
+
+const JSON_OPTION = "Print the result as JSON";
+const noTreeJson = (opts: SyncOpts) => {
+  if (opts.json) throw new Error("--json works on one target at a time; name a project (-p) or file (-f) instead of syncing the whole tree.");
 };
 
 const SKIP_DENIED = "Report targets you have no access to as skipped instead of failing";
@@ -44,18 +51,23 @@ export function registerData(program: Command): void {
       .argument("[project]", "Project name (same as -p)")
       .option("-f, --file <path>", "Output file (default: .env, or the file set in your config)")
       .option("--merge", "Merge into the existing file instead of replacing it")
+      .option("--groups", "Always write `# @group name` lines (by default only when the environment has groups)")
+      .option("--no-groups", "Never write `# @group name` lines")
       .option("--all", "Pull every target in envvault.toml/json, from any directory below it")
+      .option("--json", JSON_OPTION)
       .option("--skip-denied", SKIP_DENIED),
   ).action(async (projectArg: string | undefined, opts: SyncOpts) => {
     if (wantsWholeTree(narrowed(projectArg, opts), Boolean(opts.all))) {
-      return syncTree("pull", [], { tenant: opts.tenant, workspace: opts.workspace, skipDenied: opts.skipDenied });
+      noTreeJson(opts);
+      return syncTree("pull", [], { tenant: opts.tenant, workspace: opts.workspace, skipDenied: opts.skipDenied, groups: opts.groups });
     }
     const t = await resolveTarget({ ...opts, project: opts.project ?? projectArg });
     const ctx = { ...t.ctx, merge: opts.merge ?? t.ctx.merge };
     await orSkip(opts.skipDenied, `${t.project}/${t.env}`, async () => {
       const { keys } = await pullTarget(t.config, {
-        project: t.project, env: t.env, file: ctx.file, merge: ctx.merge, tenantId: t.tenantId,
+        project: t.project, env: t.env, file: ctx.file, merge: ctx.merge, tenantId: t.tenantId, groups: opts.groups,
       });
+      if (opts.json) return printJson({ direction: "pull", project: t.project, environment: t.env, file: ctx.file, keys });
       success(`Pulled ${plural(keys, "var")} → ${rel(ctx.file)}  ${c.dim(`(${t.project}/${t.env})`)}`);
     });
   });
@@ -68,11 +80,15 @@ export function registerData(program: Command): void {
       .option("-f, --file <path>", "Source file (default: .env, or the file set in your config)")
       .option("--all", "Push every target in envvault.toml/json, from any directory below it")
       .option("-y, --yes", "Don't ask before pushing an empty file")
+      .option("--groups", "Always read the file's groups, even with no `# @group` lines (that puts every key in default)")
+      .option("--no-groups", "Ignore `# @group name` lines in the file")
       .option("--create", "Create the project / environment first if it doesn't exist (or set create = true in the config)")
+      .option("--json", JSON_OPTION)
       .option("--skip-denied", SKIP_DENIED),
   ).action(async (projectArg: string | undefined, opts: SyncOpts) => {
     if (wantsWholeTree(narrowed(projectArg, opts), Boolean(opts.all))) {
-      return syncTree("push", [], { tenant: opts.tenant, workspace: opts.workspace, skipDenied: opts.skipDenied, create: opts.create });
+      noTreeJson(opts);
+      return syncTree("push", [], { tenant: opts.tenant, workspace: opts.workspace, skipDenied: opts.skipDenied, groups: opts.groups, create: opts.create });
     }
     const t = await resolveTarget({ ...opts, project: opts.project ?? projectArg });
     if (!existsSync(t.ctx.file)) throw new Error(`File not found: ${rel(t.ctx.file)}`);
@@ -83,11 +99,30 @@ export function registerData(program: Command): void {
       );
       if (!ok) return hint("Cancelled.");
     }
+    // A push to something that is not there: in a terminal, offer to create it; in a script, say how.
+    let create = t.ctx.create;
+    if (!create && process.stdin.isTTY && !opts.json && !(await targetExists(t.config, t))) {
+      create = await confirmAction(
+        `${t.project}/${t.env} was not found (or is hidden from you). Create it and push ${rel(t.ctx.file)}?`,
+        opts.yes,
+      );
+      if (!create) return hint("Cancelled.");
+    }
     await orSkip(opts.skipDenied, `${t.project}/${t.env}`, async () => {
-      const { keys, updatedAt, created } = await pushTarget(t.config, {
-        project: t.project, env: t.env, file: t.ctx.file, tenantId: t.tenantId, create: t.ctx.create,
+      const { keys, updatedAt, created, markersIgnored } = await pushTarget(t.config, {
+        project: t.project, env: t.env, file: t.ctx.file, tenantId: t.tenantId, create, groups: opts.groups,
+      }).catch((err: unknown) => {
+        if (!create && isDenied(err)) hint("If it doesn't exist yet, `envvault push --create` (or create = true in envvault.toml) creates it.");
+        throw err;
       });
+      if (opts.json) {
+        return printJson({
+          direction: "push", project: t.project, environment: t.env, file: t.ctx.file, keys, updatedAt,
+          created: created || null, groupMarkersIgnored: markersIgnored,
+        });
+      }
       success(`Pushed ${plural(keys, "var")} ← ${rel(t.ctx.file)}  ${c.dim(`(${t.project}/${t.env}, ${updatedAt})`)}${created ? `  ${c.green(`created ${created}`)}` : ""}`);
+      if (markersIgnored) hint("The file has # @group lines that were left out because of --no-groups.");
     });
   });
 
@@ -146,10 +181,19 @@ export function registerData(program: Command): void {
     program
       .command("get")
       .description("Print one key's value, or the whole environment as .env text")
-      .argument("[key]", "Key to print"),
+      .argument("[key]", "Key to print")
+      .option("--json", "Print as JSON, with each key's group (values are included)"),
   ).action(async (key: string | undefined, opts: SyncOpts) => {
     const t = await resolveTarget(opts);
     const loaded = await hubGetEnv(t.config, t.project, t.env, t.tenantId);
+    if (opts.json) {
+      const where = { project: t.project, environment: t.env };
+      if (key) {
+        if (!(key in loaded.env)) throw new Error(`Key "${key}" isn't in ${t.project}/${t.env}.`);
+        return printJson({ ...where, key, value: loaded.env[key], group: loaded.groups[key] ?? "default" });
+      }
+      return printJson({ ...where, updatedAt: loaded.updatedAt, variables: loaded.env, groups: loaded.groups, groupNames: loaded.labels });
+    }
     if (!key) {
       process.stdout.write(serializeEnv(loaded.env));
       return;

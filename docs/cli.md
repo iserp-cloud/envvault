@@ -117,6 +117,8 @@ Equivalent JSON uses `"tree": { "web": { "path": "apps/web", "children": { … }
 
 `push` normally needs the project and environment to exist. With `create = true` in the config (or `--create` on `push` / `tree push`), a missing **project** and **environment** are created first and then filled, so a fresh hub can be set up straight from the config. Both are created under your own key like any other, so everyone with access in the workspace can open them. Creating a project also creates its `default` environment.
 
+Run in a terminal without `--create`, a plain `envvault push` to something that isn't there asks "Create it and push?" first (the hub can't tell a missing name from one hidden from you, so the question says both). Declining cancels; `--yes` answers it for you. In scripts, with no terminal, it fails with a hint to add `--create`, so a typo can't make a new project by accident.
+
 - **The workspace is never created.** If `workspace` names one you don't belong to, the command stops with `Workspace not found` and lists yours.
 - **Nothing is overwritten.** If the name exists but you can't open it, the CLI says so instead of replacing it. Creating needs the same permission as `project create` / `env create`, and service tokens can't create.
 - `tree push -n --create` shows what would be created without changing anything.
@@ -250,6 +252,7 @@ envvault get                          # everything, as dotenv text
 | `-p, --project` | config, then saved default | Project |
 | `-e, --env` | config, then `default` | Environment |
 | `-t, --tenant`, `-w, --workspace` | config, then active workspace | Workspace slug or id (it must exist) |
+| `--groups` / `--no-groups` (`push`, `pull`, `tree push`, `tree pull`) | follows the file | By default a `push` reads `# @group name` lines when the file has them (and adds the names to the environment's list), and a `pull` writes them when the environment has groups. `--no-groups` treats them as ordinary comments (a push says so when the file has some). `--groups` forces them on: a push then takes the file as the whole truth, so with no markers every key goes to the default group. |
 | `--group` (`set` only) | unchanged | Key group for the keys being set. `push`, `set`, `unset`, restore and re-key keep the groups of the keys that stay and the environment's list of group names (a push stops if it cannot read them, instead of saving without); `pull` and `get` print the values without them. |
 | `-f, --file` | `.env`, or the config's `file` | Local file (`pull`, `push`) |
 | `--merge` | | (`pull`) merge into the existing file |
@@ -318,3 +321,39 @@ Uses SQLite by default, or Postgres via `DATABASE_URL`.
 | Crypto | Password → keys derived locally; env DEK unwrapped with your private key; payloads encrypted/decrypted in the CLI |
 
 The hub never receives your password or any decryption key — see [Security](security.md). `set` rejects the write if someone else changed the environment since you read it.
+
+### Groups in a .env file
+
+```
+LOG_LEVEL=info          # keys above the first marker are in the default group
+
+# @group db
+DATABASE_URL=postgres://…
+DB_PASSWORD=…
+
+# @group payments
+STRIPE_KEY=sk_…
+```
+
+Only a `# @group name` line of its own counts. It applies to the keys below it until the next one, and `# @group default` goes back to the default group. Plain comments, blank lines and commented-out keys mean nothing. A bad name stops the push and names the line. A `push` of a file with markers makes the file's groups the environment's groups, so a key not under any marker goes back to the default group, and names the file uses join the environment's list. A file with no markers leaves the environment's groups alone. The dashboard's import and export read and write the same markers, and a JSON object nested under a group name (`{"db": {"DATABASE_URL": "…"}}`).
+
+## For coding agents: `skill`, `check` and `--json`
+
+```bash
+envvault skill                    # print the guide: how to use EnvVault and write a correct .env
+envvault skill install            # write .claude/skills/envvault/SKILL.md and an AGENTS.md section here
+envvault skill install --global   # the Claude Code skill for your user (~/.claude/skills)
+envvault skill install --target agents   # only the AGENTS.md section (or `claude`)
+```
+
+The guide ships inside the CLI, so it always matches the installed version; run `skill install` again after upgrading. In `AGENTS.md` only the block between the `envvault:start` / `envvault:end` comments is managed; the rest of the file is never touched. It tells an agent never to print or commit secret values, that `push` replaces the whole environment (use `set` for one key), how `.env` files and `# @group` lines are written, and which commands to use.
+
+```bash
+envvault check [files...]         # default: .env. Nothing is sent to the hub; no login needed
+envvault check .env --json        # { ok, errors, warnings, files: [{ file, keys, groups, issues: [{ line, level, code, message }] }] }
+envvault check .env --strict      # warnings fail too
+```
+
+`check` exits 1 on errors: a line that is not `KEY=value`, an `export` prefix, an unusable key name, an unterminated quote, a bad `# @group` name. It warns about `value # note` (which keeps the note), duplicate keys, empty values, lower-case keys and sensitive-looking keys in a group that reads like plain settings.
+
+`--json` works on `get` (the values, each key's group, and the list of group names), on `push` and `pull` for one target, and on `env list`, `history`, `access list`, `tree list` and `whoami`.
